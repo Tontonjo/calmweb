@@ -265,16 +265,6 @@ python -m pytest tests/
 # Lancement en mode debug
 python program/calmweb.py --debug
 ```
-
-### 📋 **Roadmap**
-
-- [ ] **🔧 Interface graphique** avancée
-- [ ] **🌍 Support multi-langues**
-- [ ] **📱 Version portable** (sans installation)
-- [ ] **🤖 Intelligence artificielle** pour la détection d'arnaques
-- [ ] **☁️ Synchronisation cloud** des configurations
-- [ ] **📊 Statistiques** détaillées
-
 ---
 
 ## 📄 **Licence et crédits**
@@ -552,16 +542,6 @@ python -m pytest tests/
 # Launch in debug mode
 python program/calmweb.py --debug
 ```
-
-### 📋 **Roadmap**
-
-- [ ] **🔧 Advanced GUI**
-- [ ] **🌍 Multi-language support**
-- [ ] **📱 Portable version** (no installation)
-- [ ] **🤖 AI** for scam detection
-- [ ] **☁️ Cloud sync** for configurations
-- [ ] **📊 Detailed statistics**
-
 ---
 
 ## 📄 **License and Credits**
