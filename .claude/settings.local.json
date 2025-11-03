@@ -15,7 +15,20 @@
       "WebFetch(domain:dl.red.flag.domains)",
       "Read(//c/Users/Alan/AppData/Roaming/**)",
       "Bash(dir:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(curl:*)",
+      "Bash(C:WindowsSystem32notepad.exe \"C:\\Users\\Alan\\AppData\\Roaming\\CalmWeb\\custom.cfg\")",
+      "Bash(notepad:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:talks.freelancerepublik.com)",
+      "WebFetch(domain:datascientist.fr)",
+      "Bash(tasklist)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(del build_exe.bat create_installer.bat CalmWeb_Installer.nsi)",
+      "Bash(del /Q build_exe.bat)",
+      "Bash(del /Q create_installer.bat)",
+      "Bash(del /Q CalmWeb_Installer.nsi)"
     ],
     "deny": [],
     "ask": []

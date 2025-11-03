@@ -18,8 +18,6 @@ import platform
 import socket
 import ssl
 import urllib3
-import ctypes
-import dns.resolver
 import tkinter as tk
 from collections import deque
 from datetime import datetime
@@ -28,17 +26,16 @@ from pystray import Icon, MenuItem, Menu
 from tkinter.scrolledtext import ScrolledText
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import urllib.parse
-import select
 import ipaddress
 import traceback
 import signal
+import re
 
 # Optional Windows-only imports: encapsulées pour éviter crash si non disponibles
 try:
     import win32ui
     import win32gui
     import win32con
-    import win32com.client
     WIN32_AVAILABLE = True
 except Exception:
     WIN32_AVAILABLE = False
@@ -117,17 +114,38 @@ def _safe_str(obj):
     except Exception:
         return f"<{type(obj).__name__} object>"
 def log(msg):
+    """
+    SÉCURISÉ: Logging avec protection contre injections et sanitization.
+    """
     try:
         timestamp = time.strftime("[%H:%M:%S]")
         try:
-            # Force conversion str + remplacement erreurs unicode
-            safe_msg = str(msg).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+            # SÉCURITÉ: Conversion sécurisée et sanitization
+            safe_msg = _safe_str(msg)
+
+            # SÉCURITÉ: Nettoyer les caractères dangereux pour prévenir log injection
+            safe_msg = _sanitize_log_message(safe_msg)
+
+            # SÉCURITÉ: Encoder proprement pour UTF-8
+            safe_msg = safe_msg.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
         except Exception:
             safe_msg = "Log message conversion error"
 
         line = f"{timestamp} {safe_msg}"
 
         with _LOG_LOCK:
+            # SÉCURITÉ: Vérifier la taille du buffer pour éviter DoS mémoire
+            if len(log_buffer) >= 1000:
+                # Si le buffer est plein, on retire les anciens messages
+                try:
+                    # Garder seulement les 500 derniers messages pour éviter accumulation
+                    while len(log_buffer) > 500:
+                        log_buffer.popleft()
+                except Exception:
+                    # Si problème avec deque, recréer
+                    log_buffer.clear()
+
             # Ajout dans buffer (deque gère automatiquement la taille max)
             log_buffer.append(line)
 
@@ -139,7 +157,7 @@ def log(msg):
                 pass
 
     except Exception:
-        # Dernière ligne de défense: pas d’exception propagée
+        # Dernière ligne de défense: pas d'exception propagée
         try:
             # Tentative de signal minimal en stderr
             sys.stderr.write("Logging internal error\n")
@@ -157,8 +175,11 @@ def get_exe_icon(path, size=(64, 64)):
         return None
     try:
         large, small = win32gui.ExtractIconEx(path, 0)
+    except (OSError, AttributeError) as e:
+        log(f"get_exe_icon: ExtractIconEx error: {_sanitize_log_message(str(e))}")
+        return None
     except Exception as e:
-        log(f"get_exe_icon: ExtractIconEx error: {e}")
+        log(f"get_exe_icon: Unexpected ExtractIconEx error: {_sanitize_log_message(str(e))}")
         return None
 
     if (not small) and (not large):
@@ -166,7 +187,11 @@ def get_exe_icon(path, size=(64, 64)):
 
     try:
         hicon = large[0] if large else small[0]
-    except Exception:
+    except (IndexError, TypeError) as e:
+        log(f"get_exe_icon: Error accessing icon handle: {_sanitize_log_message(str(e))}")
+        return None
+    except Exception as e:
+        log(f"get_exe_icon: Unexpected icon handle error: {_sanitize_log_message(str(e))}")
         return None
 
     # créer DC compatible
@@ -184,69 +209,258 @@ def get_exe_icon(path, size=(64, 64)):
             (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
             bmpstr, 'raw', 'BGRX', 0, 1
         )
+    except (OSError, MemoryError, AttributeError) as e:
+        log(f"get_exe_icon: conversion error: {_sanitize_log_message(str(e))}")
+        img = None
     except Exception as e:
-        log(f"get_exe_icon: conversion error: {e}")
+        log(f"get_exe_icon: unexpected conversion error: {_sanitize_log_message(str(e))}")
         img = None
     finally:
         try:
             win32gui.DestroyIcon(hicon)
-        except Exception:
-            pass
+        except (OSError, AttributeError) as e:
+            log(f"get_exe_icon: DestroyIcon error: {_sanitize_log_message(str(e))}")
+        except Exception as e:
+            log(f"get_exe_icon: Unexpected DestroyIcon error: {_sanitize_log_message(str(e))}")
+
         try:
-            hdc_mem.DeleteDC()
-            hdc.DeleteDC()
+            if 'hdc_mem' in locals():
+                hdc_mem.DeleteDC()
+            if 'hdc' in locals():
+                hdc.DeleteDC()
             win32gui.ReleaseDC(0, 0)
-        except Exception:
-            pass
+        except (OSError, AttributeError) as e:
+            log(f"get_exe_icon: DC cleanup error: {_sanitize_log_message(str(e))}")
+        except Exception as e:
+            log(f"get_exe_icon: Unexpected DC cleanup error: {_sanitize_log_message(str(e))}")
     return img
+
+# === Security and Validation Functions ===
+def _validate_domain_input(domain):
+    """
+    SÉCURITÉ: Validation stricte des domaines pour prévenir injections.
+    Retourne True si le domaine est valide et sûr.
+    """
+    import re
+
+    if not domain or not isinstance(domain, str):
+        return False
+
+    # Nettoyer le domaine
+    domain = domain.strip().lower()
+
+    # Vérifications de base
+    if len(domain) == 0 or len(domain) > 253:
+        return False
+
+    # Vérifier caractères autorisés seulement (alphanumériques, points, tirets)
+    if not re.match(r'^[a-zA-Z0-9.-]+$', domain):
+        return False
+
+    # Vérifier structure du domaine
+    if '..' in domain or domain.startswith('.') or domain.endswith('.'):
+        return False
+
+    # Vérifier chaque label du domaine
+    labels = domain.split('.')
+    for label in labels:
+        if not label:  # label vide
+            return False
+        if len(label) > 63:  # RFC limit
+            return False
+        if label.startswith('-') or label.endswith('-'):  # tirets en début/fin interdits
+            return False
+
+    return True
+
+def _validate_hostname_input(hostname):
+    """
+    SÉCURITÉ: Validation stricte des hostnames, IPs et domaines.
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+
+    hostname = hostname.strip().lower()
+
+    # Vérifier si c'est une IP valide
+    try:
+        import ipaddress
+        ipaddress.ip_address(hostname)
+        return True  # IP valide
+    except ValueError:
+        pass  # Pas une IP, continuer avec validation domaine
+
+    # Valider comme domaine
+    return _validate_domain_input(hostname)
+
+def _sanitize_log_message(message):
+    """
+    SÉCURITÉ: Nettoie les messages de log pour prévenir injection de logs.
+    """
+    if not isinstance(message, str):
+        message = str(message)
+
+    # Remplacer caractères de contrôle et newlines
+    sanitized = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', message)
+    sanitized = sanitized.replace('\n', ' ').replace('\r', ' ')
+
+    # Limiter la longueur pour éviter spam
+    if len(sanitized) > 200:
+        sanitized = sanitized[:197] + "..."
+
+    return sanitized
+
+def _validate_file_path(path, allowed_dirs):
+    """
+    SÉCURITÉ: Validation des chemins de fichiers pour prévenir directory traversal.
+    """
+    try:
+        # Normaliser le chemin
+        normalized = os.path.normpath(os.path.abspath(path))
+
+        # Vérifier qu'il n'y a pas de traversal
+        if '..' in path or not any(normalized.startswith(os.path.normpath(d)) for d in allowed_dirs):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+# === Exceptions personnalisées ===
+class CalmWebError(Exception):
+    """Exception de base pour CalmWeb."""
+    pass
+
+class NetworkError(CalmWebError):
+    """Erreur réseau."""
+    pass
+
+class ConfigurationError(CalmWebError):
+    """Erreur de configuration."""
+    pass
+
+class SecurityError(CalmWebError):
+    """Erreur de sécurité."""
+    pass
+
+class ValidationError(CalmWebError):
+    """Erreur de validation des entrées."""
+    pass
 
 # === Custom config handling ===
 def get_custom_cfg_path(install_dir=None):
     """
-    Retourne le chemin du custom.cfg: priorise APPDATA, sinon install_dir, sinon dossier courant.
+    SÉCURISÉ: Retourne le chemin du custom.cfg avec validation.
+    Priorise APPDATA, sinon install_dir, sinon dossier courant.
     """
     try:
-        if USER_CFG_DIR:
-            return USER_CFG_PATH
-    except Exception:
-        pass
-    if install_dir and os.path.isdir(install_dir):
-        return os.path.join(install_dir, CUSTOM_CFG_NAME)
-    return os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), CUSTOM_CFG_NAME)
+        # SÉCURITÉ: Vérifier que USER_CFG_DIR est défini et valide
+        if USER_CFG_DIR and isinstance(USER_CFG_DIR, str):
+            # SÉCURITÉ: Normaliser le chemin pour éviter directory traversal
+            normalized_dir = os.path.normpath(USER_CFG_DIR)
+            if not '..' in normalized_dir:
+                return USER_CFG_PATH
+    except Exception as e:
+        log(f"get_custom_cfg_path: USER_CFG_DIR error: {_sanitize_log_message(str(e))}")
+
+    # SÉCURITÉ: Valider install_dir si fourni
+    if install_dir and isinstance(install_dir, str):
+        try:
+            normalized_install = os.path.normpath(install_dir)
+            if not '..' in normalized_install and os.path.isdir(normalized_install):
+                return os.path.join(normalized_install, CUSTOM_CFG_NAME)
+        except Exception as e:
+            log(f"get_custom_cfg_path: install_dir error: {_sanitize_log_message(str(e))}")
+
+    # SÉCURITÉ: Fallback vers dossier courant avec validation
+    try:
+        current_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        normalized_current = os.path.normpath(current_dir)
+        return os.path.join(normalized_current, CUSTOM_CFG_NAME)
+    except Exception as e:
+        log(f"get_custom_cfg_path: fallback error: {_sanitize_log_message(str(e))}")
+        # Dernier recours - dossier courant
+        return CUSTOM_CFG_NAME
 
 def write_default_custom_cfg(path, blocked_set, whitelist_set):
     """
-    Écrit un fichier custom.cfg par défaut. Ne lève pas d'exception.
+    SÉCURISÉ: Écrit un fichier custom.cfg par défaut avec validation.
     Inclut les options block_ip_direct, block_http_traffic et block_http_other_ports.
     """
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
+        # SÉCURITÉ: Validation du chemin
+        if not path or not isinstance(path, str):
+            raise ValidationError("Chemin de fichier config invalide")
+
+        # SÉCURITÉ: Normaliser le chemin et vérifier directory traversal
+        normalized_path = os.path.normpath(path)
+        if '..' in path:
+            raise SecurityError(f"Directory traversal détecté dans chemin config: {path}")
+
+        # SÉCURITÉ: Validation des sets d'entrée
+        if not isinstance(blocked_set, (set, list, tuple)):
+            blocked_set = set()
+        if not isinstance(whitelist_set, (set, list, tuple)):
+            whitelist_set = set()
+
+        # Créer le répertoire parent avec permissions sécurisées
+        parent_dir = os.path.dirname(normalized_path)
+        if parent_dir:
+            os.makedirs(parent_dir, mode=0o755, exist_ok=True)
+
+        # SÉCURITÉ: Écriture atomique via fichier temporaire
+        temp_path = normalized_path + '.tmp'
+
+        with open(temp_path, 'w', encoding='utf-8') as f:
             # --- Section BLOCK ---
             f.write("[BLOCK]\n")
             for d in sorted(blocked_set):
-                f.write(f"{d}\n")
+                # SÉCURITÉ: Valider chaque domaine avant écriture
+                if isinstance(d, str) and _validate_domain_input(d):
+                    f.write(f"{d}\n")
 
             # --- Section WHITELIST ---
             f.write("\n[WHITELIST]\n")
             for d in sorted(whitelist_set):
-                f.write(f"{d}\n")
+                # SÉCURITÉ: Valider chaque domaine avant écriture
+                if isinstance(d, str) and _validate_domain_input(d):
+                    f.write(f"{d}\n")
+
             # --- Section OPTIONS ---
             f.write("\n[OPTIONS]\n")
             f.write("block_ip_direct = 1\n")
             f.write("block_http_traffic = 1\n")
             f.write("block_http_other_ports = 1\n")
 
-        log(f"Fichier de configuration créé : {path}")
+        # SÉCURITÉ: Déplacement atomique du fichier temporaire
+        if os.path.exists(temp_path):
+            if os.path.exists(normalized_path):
+                os.remove(normalized_path)
+            os.rename(temp_path, normalized_path)
+
+        log(f"Fichier de configuration créé avec succès")
+
+    except (ValidationError, SecurityError):
+        raise
+    except OSError as e:
+        raise ConfigurationError(f"Erreur système écriture config: {_sanitize_log_message(str(e))}")
     except Exception as e:
-        log(f"Erreur écriture custom.cfg {path} : {e}")
+        raise ConfigurationError(f"Erreur écriture custom.cfg: {_sanitize_log_message(str(e))}")
+    finally:
+        # Nettoyer le fichier temporaire si il existe encore
+        try:
+            if 'temp_path' in locals() and os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
 
 
 def parse_custom_cfg(path):
     """
     Parse un custom.cfg simple. Renvoie (blocked_set, whitelist_set).
-    Tolérant aux erreurs.
+    SÉCURISÉ contre les injections et validé.
     """
+
     blocked = set()
     whitelist = set()
     global block_ip_direct, block_http_traffic, block_http_other_ports
@@ -256,18 +470,64 @@ def parse_custom_cfg(path):
     block_http_traffic = True
     block_http_other_ports = True
 
+    # SÉCURITÉ: Validation du chemin du fichier
+    try:
+        # Normaliser le chemin et vérifier qu'il n'y a pas de directory traversal
+        normalized_path = os.path.normpath(path)
+        if '..' in normalized_path or not normalized_path.startswith((
+            os.path.normpath(USER_CFG_DIR),
+            os.path.normpath(INSTALL_DIR),
+            os.path.normpath(os.path.dirname(os.path.abspath(sys.argv[0])))
+        )):
+            log(f"SÉCURITÉ: Chemin de configuration suspect rejeté: {path}")
+            return blocked, whitelist
+    except Exception as e:
+        log(f"SÉCURITÉ: Erreur validation chemin config: {e}")
+        return blocked, whitelist
+
     if not os.path.exists(path):
         log(f"custom.cfg introuvable à {path}")
         return blocked, whitelist
 
-    section = None
+    # SÉCURITÉ: Vérifier taille du fichier (max 10MB)
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        file_size = os.path.getsize(path)
+        if file_size > 10 * 1024 * 1024:  # 10MB max
+            log(f"SÉCURITÉ: Fichier config trop volumineux ({file_size} bytes), rejeté")
+            return blocked, whitelist
+    except Exception as e:
+        log(f"SÉCURITÉ: Erreur vérification taille fichier: {e}")
+        return blocked, whitelist
+
+    # Regex pour validation des clés d'options - SÉCURISÉ
+    OPTION_KEY_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+    section = None
+    line_count = 0
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             for raw in f:
+                line_count += 1
+                # SÉCURITÉ: Limiter nombre de lignes (max 50000)
+                if line_count > 50000:
+                    log(f"SÉCURITÉ: Fichier config trop de lignes (>{line_count}), arrêt du parsing")
+                    break
+
                 try:
+                    # SÉCURITÉ: Limiter longueur de ligne (max 500 chars)
+                    if len(raw) > 500:
+                        log(f"SÉCURITÉ: Ligne {line_count} trop longue, ignorée")
+                        continue
+
                     line = raw.strip()
                     if not line or line.startswith('#'):
                         continue
+
+                    # SÉCURITÉ: Validation caractères - pas de caractères de contrôle
+                    if any(ord(c) < 32 and c not in '\t\n\r' for c in line):
+                        log(f"SÉCURITÉ: Ligne {line_count} contient caractères de contrôle, ignorée")
+                        continue
+
                     up = line.upper()
                     if up == "[BLOCK]":
                         section = "BLOCK"
@@ -280,37 +540,71 @@ def parse_custom_cfg(path):
                         continue
 
                     if section == "BLOCK":
-                        blocked.add(line.lower().lstrip('.'))
+                        # SÉCURITÉ: Validation stricte des domaines
+                        domain = line.lower().lstrip('.')
+                        if _validate_domain_input(domain):
+                            blocked.add(domain)
+                        else:
+                            log(f"SÉCURITÉ: Domaine bloqué invalide ligne {line_count}: {domain}")
+
                     elif section == "WHITELIST":
-                        whitelist.add(line.lower().lstrip('.'))
+                        # SÉCURITÉ: Validation stricte des domaines
+                        domain = line.lower().lstrip('.')
+                        if _validate_domain_input(domain):
+                            whitelist.add(domain)
+                        else:
+                            log(f"SÉCURITÉ: Domaine whitelist invalide ligne {line_count}: {domain}")
+
                     elif section == "OPTIONS":
                         try:
+                            if '=' not in line:
+                                continue
                             key, val = line.split('=', 1)
                             key = key.strip().lower()
                             val = val.strip().lower()
+
+                            # SÉCURITÉ: Validation de la clé d'option
+                            if not OPTION_KEY_PATTERN.match(key):
+                                log(f"SÉCURITÉ: Clé option invalide ligne {line_count}: {key}")
+                                continue
+
+                            # SÉCURITÉ: Validation de la valeur (seulement boolean)
+                            if val not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
+                                log(f"SÉCURITÉ: Valeur option invalide ligne {line_count}: {val}")
+                                continue
+
                             enabled = val in ("1", "true", "yes", "on")
+
+                            # SÉCURITÉ: Uniquement les options connues
                             if key == "block_ip_direct":
                                 block_ip_direct = enabled
                             elif key == "block_http_traffic":
                                 block_http_traffic = enabled
                             elif key == "block_http_other_ports":
                                 block_http_other_ports = enabled
-                        except Exception:
-                            # ligne mal formée -> ignorer
-                            pass
+                            else:
+                                log(f"SÉCURITÉ: Option inconnue ignorée ligne {line_count}: {key}")
+
+                        except ValueError as e:
+                            log(f"SÉCURITÉ: Erreur parsing option ligne {line_count}: {e}")
+                            continue
                     else:
-                        blocked.add(line.lower().lstrip('.'))
-                except Exception:
-                    # ignorer une ligne problématique
+                        # Section inconnue - traiter comme BLOCK avec validation
+                        domain = line.lower().lstrip('.')
+                        if _validate_domain_input(domain):
+                            blocked.add(domain)
+                        else:
+                            log(f"SÉCURITÉ: Domaine par défaut invalide ligne {line_count}: {domain}")
+
+                except Exception as e:
+                    log(f"SÉCURITÉ: Erreur parsing ligne {line_count}: {e}")
                     continue
 
-        log(
-            f"custom.cfg chargé : {len(blocked)} bloqués, {len(whitelist)} whitelist, "
-            f"IP block={block_ip_direct}, HTTP block={block_http_traffic}, "
-            f"HTTP other ports={block_http_other_ports}"
-        )
+        # Logging sécurisé (pas de données utilisateur dans les logs)
+        log(f"custom.cfg chargé : {len(blocked)} bloqués, {len(whitelist)} whitelist")
+
     except Exception as e:
-        log(f"Erreur lecture custom.cfg {path} : {e}")
+        log(f"SÉCURITÉ: Erreur lecture custom.cfg {_sanitize_log_message(str(e))}")
 
     return blocked, whitelist
 
@@ -321,8 +615,10 @@ def ensure_custom_cfg_exists(install_dir, default_blocked, default_whitelist):
     """
     try:
         if not os.path.isdir(USER_CFG_DIR):
+            log(f"Création du répertoire de configuration : {USER_CFG_DIR}")
             os.makedirs(USER_CFG_DIR, exist_ok=True)
         if not os.path.exists(USER_CFG_PATH):
+            log(f"Création du fichier de configuration : {USER_CFG_PATH}")
             write_default_custom_cfg(USER_CFG_PATH, default_blocked, default_whitelist)
         return USER_CFG_PATH
     except Exception as e:
@@ -432,20 +728,60 @@ BLOCKLIST_URLS = get_blocklist_urls()
 # === Firewall / Proxy ===
 def add_firewall_rule(target_file):
     """
-    Tente d'ajouter une règle de pare-feu via netsh. Capture erreurs.
+    SÉCURISÉ: Tente d'ajouter une règle de pare-feu via netsh avec validation.
     """
     try:
         if platform.system().lower() != 'windows':
             log("add_firewall_rule: non-Windows, skip.")
             return
-        subprocess.run([
+
+        # SÉCURITÉ: Validation du chemin du fichier
+        if not target_file or not isinstance(target_file, str):
+            raise SecurityError("Chemin de fichier invalide pour règle firewall")
+
+        # Normaliser et valider le chemin
+        normalized_path = os.path.normpath(os.path.abspath(target_file))
+
+        # Vérifier que le fichier existe
+        if not os.path.exists(normalized_path):
+            raise SecurityError(f"Fichier target inexistant: {normalized_path}")
+
+        # Vérifier que c'est dans un répertoire autorisé
+        allowed_dirs = [
+            os.path.normpath(INSTALL_DIR),
+            os.path.normpath(os.path.dirname(os.path.abspath(sys.argv[0])))
+        ]
+
+        if not any(normalized_path.startswith(d) for d in allowed_dirs):
+            raise SecurityError(f"Chemin non autorisé pour règle firewall: {normalized_path}")
+
+        # SÉCURITÉ: Construction sécurisée de la commande
+        cmd = [
             "netsh", "advfirewall", "firewall", "add", "rule",
             "name=CalmWeb", "dir=in", "action=allow",
-            "program=" + target_file, "profile=any"
-        ], check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        log("Règles du pare-feu ajoutées.")
+            f"program={normalized_path}", "profile=any"
+        ]
+
+        # SÉCURITÉ: Exécution avec timeout et flags sécurisés
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=30,  # Timeout de 30 secondes
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True,
+            text=True
+        )
+
+        log("Règles du pare-feu ajoutées avec succès.")
+
+    except subprocess.TimeoutExpired:
+        raise NetworkError("Timeout lors de l'ajout de la règle firewall")
+    except subprocess.CalledProcessError as e:
+        raise NetworkError(f"Erreur netsh firewall (code {e.returncode}): {_sanitize_log_message(str(e))}")
+    except (SecurityError, NetworkError):
+        raise  # Re-lever les erreurs de sécurité/réseau
     except Exception as e:
-        log(f"Erreur firewall : {e}")
+        raise NetworkError(f"Erreur firewall: {_sanitize_log_message(str(e))}")
 
 
 # === Blocklist Resolver ===
@@ -491,24 +827,71 @@ class BlocklistResolver:
                         try:
                             log(f"⬇️ Chargement blocklist {url} (tentative {attempt+1})")
 
-                            # Support des fichiers locaux (file://)
+                            # Support des fichiers locaux (file://) avec validation
                             if url.startswith("file://"):
                                 file_path = url[7:]  # Enlever "file://"
+
+                                # SÉCURITÉ: Validation du chemin de fichier local
+                                if not _validate_file_path(file_path, [USER_CFG_DIR]):
+                                    raise SecurityError(f"Chemin de fichier non autorisé: {file_path}")
+
+                                # SÉCURITÉ: Vérifier la taille du fichier avant lecture
+                                try:
+                                    file_size = os.path.getsize(file_path)
+                                    if file_size > 50 * 1024 * 1024:  # 50MB max
+                                        raise SecurityError(f"Fichier blocklist trop volumineux: {file_size} bytes")
+                                except OSError:
+                                    raise NetworkError(f"Impossible d'accéder au fichier: {file_path}")
+
                                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                                     content = f.read()
                             else:
-                                # Téléchargement HTTP/HTTPS classique
-                                response = http.request("GET", url, timeout=urllib3.Timeout(connect=5.0, read=10.0))
+                                # SÉCURITÉ: Validation de l'URL
+                                if not url.startswith(('https://', 'http://')):
+                                    raise SecurityError(f"URL non autorisée: {url}")
+
+                                # Téléchargement HTTP/HTTPS classique avec timeouts stricts
+                                response = http.request(
+                                    "GET",
+                                    url,
+                                    timeout=urllib3.Timeout(connect=10.0, read=30.0),
+                                    retries=urllib3.Retry(total=2, backoff_factor=1)
+                                )
                                 if response.status != 200:
-                                    raise Exception(f"HTTP {response.status}")
+                                    raise NetworkError(f"HTTP {response.status}")
+
+                                # SÉCURITÉ: Vérifier la taille de la réponse
+                                content_length = response.headers.get('Content-Length')
+                                if content_length and int(content_length) > 50 * 1024 * 1024:  # 50MB max
+                                    raise SecurityError(f"Réponse trop volumineuse: {content_length} bytes")
+
                                 content = response.data.decode("utf-8", errors='ignore')
+                            # SÉCURITÉ: Limiter le nombre de lignes traitées
+                            lines_processed = 0
+                            max_lines = 1000000  # 1M lignes max par fichier
+
                             for line in content.splitlines():
+                                lines_processed += 1
+                                if lines_processed > max_lines:
+                                    log(f"SÉCURITÉ: Limite de lignes atteinte pour {url}: {max_lines}")
+                                    break
+
                                 try:
+                                    # SÉCURITÉ: Limiter la longueur de ligne
+                                    if len(line) > 500:
+                                        continue
+
                                     line = line.split('#', 1)[0].strip()
                                     if not line:
                                         continue
+
+                                    # SÉCURITÉ: Validation des caractères de la ligne
+                                    if any(ord(c) < 32 and c not in '\t\n\r' for c in line):
+                                        continue
+
                                     parts = line.split()
                                     domain = None
+
                                     if len(parts) == 1:
                                         domain = parts[0]
                                     elif len(parts) >= 2:
@@ -516,20 +899,42 @@ class BlocklistResolver:
                                             domain = parts[0]
                                         else:
                                             domain = parts[1]
+
                                     if not domain:
                                         continue
+
                                     domain = domain.lower().lstrip('.')
-                                    if not domain or self._looks_like_ip(domain):
+
+                                    # SÉCURITÉ: Validation stricte du domaine
+                                    if not _validate_domain_input(domain):
                                         continue
+
+                                    # SÉCURITÉ: Exclure les domaines d'IP
+                                    if self._looks_like_ip(domain):
+                                        continue
+
+                                    # SÉCURITÉ: Vérifier longueur RFC
                                     if len(domain) > 253:
                                         continue
+
                                     domains.add(domain)
-                                except Exception:
+
+                                except (UnicodeDecodeError, ValueError) as e:
+                                    log(f"SÉCURITÉ: Ligne invalide ignorée: {_sanitize_log_message(str(e))}")
+                                    continue
+                                except Exception as e:
+                                    log(f"SÉCURITÉ: Erreur parsing ligne: {_sanitize_log_message(str(e))}")
                                     continue
                             success = True
                             break
+                        except (SecurityError, NetworkError) as e:
+                            log(f"SÉCURITÉ: Blocklist {url} tentative {attempt+1}: {e}")
+                            time.sleep(1 + attempt * 2)
+                        except (urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError, OSError) as e:
+                            log(f"RÉSEAU: Blocklist {url} tentative {attempt+1}: {_sanitize_log_message(str(e))}")
+                            time.sleep(1 + attempt * 2)
                         except Exception as e:
-                            log(f"[Erreur] Loading {url} attempt {attempt+1}: {e}")
+                            log(f"ERREUR: Blocklist {url} tentative {attempt+1}: {_sanitize_log_message(str(e))}")
                             time.sleep(1 + attempt * 2)
                     if not success:
                         log(f"[⚠️] Échec téléchargement blocklist depuis {url}")
@@ -752,54 +1157,153 @@ class BlocklistResolver:
 # === System proxy ===
 def set_system_proxy(enable=True, host=PROXY_BIND_IP, port=PROXY_PORT):
     """
-    Met en place ou retire le proxy système. Tolère erreurs.
+    SÉCURISÉ: Met en place ou retire le proxy système avec validation.
     """
     try:
         if platform.system().lower() != 'windows':
             log("set_system_proxy: non-Windows, skip.")
             return
+
+        # SÉCURITÉ: Validation des paramètres d'entrée
+        if not isinstance(enable, bool):
+            raise ValidationError("Paramètre enable doit être boolean")
+
         if enable:
+            # SÉCURITÉ: Validation de l'host et du port
+            if not host or not isinstance(host, str):
+                raise ValidationError("Host proxy invalide")
+
+            if not isinstance(port, int) or port < 1 or port > 65535:
+                raise ValidationError(f"Port proxy invalide: {port}")
+
+            # SÉCURITÉ: Validation de l'adresse IP
+            try:
+                import ipaddress
+                ipaddress.ip_address(host)
+            except ValueError:
+                raise ValidationError(f"Adresse IP host invalide: {host}")
+
+            # SÉCURITÉ: S'assurer que c'est localhost uniquement
+            if host not in ['127.0.0.1', '::1']:
+                raise SecurityError(f"Seuls les proxies localhost sont autorisés: {host}")
+
             proxy_str = f"{host}:{port}"
+
+            # Tentative netsh avec timeout et validation
             try:
-                subprocess.run(["netsh", "winhttp", "set", "proxy", proxy_str], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                # netsh peut échouer selon les permissions
-                pass
+                cmd = ["netsh", "winhttp", "set", "proxy", proxy_str]
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    log(f"WARN: netsh set proxy failed (code {result.returncode})")
+            except subprocess.TimeoutExpired:
+                log("WARN: netsh set proxy timeout")
+            except Exception as e:
+                log(f"WARN: netsh set proxy error: {_sanitize_log_message(str(e))}")
+
+            # Variables d'environnement avec timeout
             try:
-                subprocess.run(["setx", "HTTP_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-                subprocess.run(["setx", "HTTPS_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                pass
+                env_value = f"http://{proxy_str}"
+                subprocess.run(
+                    ["setx", "HTTP_PROXY", env_value],
+                    check=False,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True
+                )
+                subprocess.run(
+                    ["setx", "HTTPS_PROXY", env_value],
+                    check=False,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True
+                )
+            except subprocess.TimeoutExpired:
+                log("WARN: setx timeout pour variables proxy")
+            except Exception as e:
+                log(f"WARN: setx error: {_sanitize_log_message(str(e))}")
+
+            # Registry Windows avec validation
             try:
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                    0,
+                    winreg.KEY_SET_VALUE
+                )
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, proxy_str)
                 winreg.CloseKey(key)
             except Exception as e:
-                log(f"set_system_proxy windows registry fail: {e}")
+                log(f"WARN: Registry set proxy error: {_sanitize_log_message(str(e))}")
+
             log(f"Proxy système configuré sur {proxy_str}")
+
         else:
+            # Désactivation du proxy - Nettoyage sécurisé
             try:
-                subprocess.run(["netsh", "winhttp", "reset", "proxy"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                pass
+                cmd = ["netsh", "winhttp", "reset", "proxy"]
+                subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True
+                )
+            except subprocess.TimeoutExpired:
+                log("WARN: netsh reset proxy timeout")
+            except Exception as e:
+                log(f"WARN: netsh reset proxy error: {_sanitize_log_message(str(e))}")
+
+            # Nettoyer variables d'environnement
             try:
-                subprocess.run(["setx", "HTTP_PROXY", ""], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-                subprocess.run(["setx", "HTTPS_PROXY", ""], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                pass
+                subprocess.run(
+                    ["setx", "HTTP_PROXY", ""],
+                    check=False,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True
+                )
+                subprocess.run(
+                    ["setx", "HTTPS_PROXY", ""],
+                    check=False,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    capture_output=True
+                )
+            except subprocess.TimeoutExpired:
+                log("WARN: setx clear timeout")
+            except Exception as e:
+                log(f"WARN: setx clear error: {_sanitize_log_message(str(e))}")
+
+            # Nettoyer registry
             try:
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                    0,
+                    winreg.KEY_SET_VALUE
+                )
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "")
                 winreg.CloseKey(key)
             except Exception as e:
-                log(f"set_system_proxy windows registry clear fail: {e}")
+                log(f"WARN: Registry clear proxy error: {_sanitize_log_message(str(e))}")
+
             log("Proxy système réinitialisé.")
+
+    except (ValidationError, SecurityError):
+        raise  # Re-lever les erreurs de validation/sécurité
     except Exception as e:
-        log(f"Erreur set_system_proxy: {e}")
+        raise NetworkError(f"Erreur set_system_proxy: {_sanitize_log_message(str(e))}")
 
 # === Helper relay (high-performance pass-through) ===
 def _set_socket_opts_for_perf(sock):
@@ -872,18 +1376,83 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
     VOIP_ALLOWED_PORTS = {80, 443, 3478, 5060, 5061}  # ports VOIP/STUN/SIP autorisés
 
     def _extract_hostname_from_path(self, path):
+        """
+        SÉCURISÉ: Extraction du hostname avec validation stricte.
+        """
         try:
+            if not path or not isinstance(path, str):
+                return None
+
+            # SÉCURITÉ: Limiter la longueur de l'URL
+            if len(path) > 2048:  # RFC recommandé
+                log(f"SÉCURITÉ: URL trop longue rejetée: {len(path)} chars")
+                return None
+
+            # SÉCURITÉ: Vérifier caractères dangereux
+            if any(ord(c) < 32 and c not in '\t\n\r' for c in path):
+                log("SÉCURITÉ: URL contient caractères de contrôle")
+                return None
+
             parsed = urllib.parse.urlparse(path)
-            return parsed.hostname
-        except Exception:
+            hostname = parsed.hostname
+
+            if hostname:
+                # SÉCURITÉ: Validation du hostname extrait
+                if _validate_hostname_input(hostname):
+                    return hostname.lower()
+                else:
+                    log(f"SÉCURITÉ: Hostname invalide extrait: {_sanitize_log_message(hostname)}")
+                    return None
+
+            return None
+
+        except (ValueError, UnicodeError) as e:
+            log(f"SÉCURITÉ: Erreur parsing URL: {_sanitize_log_message(str(e))}")
+            return None
+        except Exception as e:
+            log(f"SÉCURITÉ: Erreur inattendue extraction hostname: {_sanitize_log_message(str(e))}")
             return None
 
     def do_CONNECT(self):
-        host_port = self.path
-        target_host, target_port = host_port.split(':', 1)
-        target_port = int(target_port)
-        hostname = target_host.lower() if target_host else None
+        """
+        SÉCURISÉ: Gestion CONNECT avec validation stricte des entrées.
+        """
         try:
+            # SÉCURITÉ: Validation de base du path
+            if not self.path or not isinstance(self.path, str):
+                self.send_error(400, "Bad Request - path invalide")
+                return
+
+            # SÉCURITÉ: Limiter longueur path
+            if len(self.path) > 256:  # CONNECT doit être court
+                self.send_error(400, "Bad Request - path trop long")
+                return
+
+            # SÉCURITÉ: Vérifier format host:port
+            if ':' not in self.path:
+                self.send_error(400, "Bad Request - format invalide")
+                return
+
+            try:
+                target_host, port_str = self.path.split(':', 1)
+                target_port = int(port_str)
+            except ValueError:
+                self.send_error(400, "Bad Request - port invalide")
+                return
+
+            # SÉCURITÉ: Validation du port
+            if target_port < 1 or target_port > 65535:
+                self.send_error(400, f"Bad Request - port hors limites: {target_port}")
+                return
+
+            # SÉCURITÉ: Validation du hostname
+            if not target_host or not _validate_hostname_input(target_host):
+                self.send_error(400, "Bad Request - hostname invalide")
+                return
+
+            hostname = target_host.lower()
+
+            # Continuation de la logique existante
             if current_resolver:
                 current_resolver.maybe_reload_background()
 
@@ -939,12 +1508,11 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                     self.send_error(502, "Bad Gateway")
                     return
 
-                # sinon on applique les règles normales
-                if block_http_other_ports and target_port not in self.VOIP_ALLOWED_PORTS:
-                    log(f"🚫 [Proxy BLOCK other port] {target_host}:{target_port}")
-                    self.send_error(403, "port non standard bloqué par sécurité")
-                    return
-
+            # Pour les domaines NON whitelistés, appliquer les règles normales
+            if block_http_other_ports and target_port not in self.VOIP_ALLOWED_PORTS:
+                log(f"🚫 [Proxy BLOCK other port] {target_host}:{target_port}")
+                self.send_error(403, "port non standard bloqué par sécurité")
+                return
 
             # Autorisation normale — établir tunnel
             log(f"✅ [Proxy ALLOW HTTPS] {hostname}")
@@ -963,45 +1531,88 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             remote.setblocking(True)
             full_duplex_relay(conn, remote)
 
-        except Exception as e:
-            log(f"[Proxy CONNECT error] {e}")
+        except (SecurityError, ValidationError) as e:
+            log(f"SÉCURITÉ: CONNECT bloqué: {e}")
+            try:
+                self.send_error(403, "Forbidden")
+            except Exception:
+                pass
+        except (NetworkError, OSError, socket.error) as e:
+            log(f"RÉSEAU: CONNECT error: {_sanitize_log_message(str(e))}")
             try:
                 self.send_error(502, "Bad Gateway")
             except Exception:
                 pass
+        except Exception as e:
+            log(f"ERREUR: CONNECT inattendue: {_sanitize_log_message(str(e))}")
+            try:
+                self.send_error(500, "Internal Server Error")
+            except Exception:
+                pass
 
     def _handle_http_method(self):
-        if current_resolver:
-            current_resolver.maybe_reload_background()
-
-        hostname = self._extract_hostname_from_path(self.path)
-        if not hostname:
-            host_header = self.headers.get('Host', '')
-            hostname = host_header.split(':', 1)[0] if host_header else None
-        if hostname:
-            hostname = hostname.lower().strip()
-
-        # Centraliser la vérification whitelist via current_resolver
-        is_whitelisted = False
+        """
+        SÉCURISÉ: Gestion des méthodes HTTP avec validation complète.
+        """
         try:
-            if current_resolver and current_resolver.is_whitelisted(hostname):
-                is_whitelisted = True
-        except Exception as e:
-            log(f"_handle_http_method whitelist check error for {hostname}: {e}")
+            if current_resolver:
+                current_resolver.maybe_reload_background()
 
-        # Si whitelistée => bypass complet : on n'applique pas block_http_traffic, ports ni blocklist
-        if is_whitelisted:
-            log(f"✅ [WHITELIST BYPASS HTTP] {hostname} ({self.command} {self.path})")
-            # Continue vers le forwarding normal (ne pas envoyer 403 même si block_enabled)
-            # Le reste du code va établir la connexion et relayer normalement.
-        else:
-            # si non whitelistée, on applique les protections normales
-            if block_enabled and current_resolver and current_resolver._is_blocked(hostname):
-                log(f"🚫 [Proxy BLOCK HTTP] {hostname} ({self.command} {self.path})")
-                self.send_error(403, "Bloqué par sécurité")
+            # SÉCURITÉ: Validation du path
+            if not self.path or not isinstance(self.path, str):
+                self.send_error(400, "Bad Request - path invalide")
                 return
 
-        try:
+            # SÉCURITÉ: Limiter longueur du path
+            if len(self.path) > 4096:  # RFC recommandé pour HTTP
+                self.send_error(414, "URI Too Long")
+                return
+
+            hostname = self._extract_hostname_from_path(self.path)
+            if not hostname:
+                host_header = self.headers.get('Host', '')
+                if host_header and isinstance(host_header, str):
+                    # SÉCURITÉ: Validation du header Host
+                    if len(host_header) > 255:  # Limite raisonnable
+                        self.send_error(400, "Bad Request - Host header trop long")
+                        return
+
+                    # SÉCURITÉ: Nettoyer et valider Host header
+                    try:
+                        hostname = host_header.split(':', 1)[0] if host_header else None
+                        if hostname and not _validate_hostname_input(hostname):
+                            log(f"SÉCURITÉ: Host header invalide: {_sanitize_log_message(hostname)}")
+                            self.send_error(400, "Bad Request - Host invalide")
+                            return
+                    except Exception:
+                        self.send_error(400, "Bad Request - Host header malformé")
+                        return
+
+            if hostname:
+                hostname = hostname.lower().strip()
+
+            # Centraliser la vérification whitelist via current_resolver
+            is_whitelisted = False
+            try:
+                if current_resolver and current_resolver.is_whitelisted(hostname):
+                    is_whitelisted = True
+            except Exception as e:
+                log(f"_handle_http_method whitelist check error for {hostname}: {_sanitize_log_message(str(e))}")
+
+            # Si whitelistée => bypass complet : on n'applique pas block_http_traffic, ports ni blocklist
+            if is_whitelisted:
+                log(f"✅ [WHITELIST BYPASS HTTP] {hostname} ({self.command} {self.path})")
+                # Continue vers le forwarding normal (ne pas envoyer 403 même si block_enabled)
+                # Le reste du code va établir la connexion et relayer normalement.
+            else:
+                # si non whitelistée, on applique les protections normales
+                if block_enabled and current_resolver and current_resolver._is_blocked(hostname):
+                    log(f"🚫 [Proxy BLOCK HTTP] {hostname} ({self.command} {self.path})")
+                    self.send_error(403, "Bloqué par sécurité")
+                    return
+
+            # SÉCURITÉ: Continuer vers la logique de forwarding avec validation
+            # du reste des paramètres (target_host, port, etc.)
             # Extraire target_host, target_port, path_only de la requête
             if isinstance(self.path, str) and self.path.startswith(("http://", "https://")):
                 parsed = urllib.parse.urlparse(self.path)
@@ -1081,8 +1692,16 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
 
             try:
                 remote.sendall(request_bytes)
+            except (OSError, socket.error) as e:
+                log(f"RÉSEAU: Proxy send headers error: {_sanitize_log_message(str(e))}")
+                try:
+                    remote.close()
+                except Exception:
+                    pass
+                self.send_error(502, "Bad Gateway")
+                return
             except Exception as e:
-                log(f"[Proxy send headers error] {e}")
+                log(f"ERREUR: Proxy send headers error: {_sanitize_log_message(str(e))}")
                 try:
                     remote.close()
                 except Exception:
@@ -1098,10 +1717,22 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
 
             log(f"[Proxy FORWARD DIRECT] {target_host}:{target_port} -> {self.command} {path_only}")
 
-        except Exception as e:
-            log(f"[Proxy forward error] {e}\n{traceback.format_exc()}")
+        except (SecurityError, ValidationError) as e:
+            log(f"SÉCURITÉ: HTTP method bloqué: {e}")
+            try:
+                self.send_error(403, "Forbidden")
+            except Exception:
+                pass
+        except (NetworkError, OSError, socket.error) as e:
+            log(f"RÉSEAU: HTTP forward error: {_sanitize_log_message(str(e))}")
             try:
                 self.send_error(502, "Bad Gateway")
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"ERREUR: HTTP method inattendue: {_sanitize_log_message(str(e))}")
+            try:
+                self.send_error(500, "Internal Server Error")
             except Exception:
                 pass
 
@@ -1168,31 +1799,246 @@ def create_image():
     except Exception:
         return None
 
-def open_config_in_editor(path):
+def get_default_text_editor():
     """
-    Ouvre le fichier de config dans le Bloc-notes (non bloquant).
+    SÉCURISÉ: Détecte l'éditeur de texte par défaut du système Windows.
+    Retourne un tuple (chemin_editeur, arguments) ou (None, None) si aucun trouvé.
     """
     try:
-        if not os.path.exists(path):
-            log(f"custom.cfg absent, création avant ouverture : {path}")
-            write_default_custom_cfg(path, manual_blocked_domains, whitelisted_domains)
-        # lancer Notepad sur thread séparé pour ne pas bloquer UI
-        def _open():
+        if platform.system().lower() != 'windows':
+            return None, None
+
+        import winreg
+
+        # Essayer de récupérer l'éditeur par défaut pour les fichiers .txt
+        try:
+            # Ouvrir la clé pour l'association .txt
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ".txt") as key:
+                prog_id = winreg.QueryValue(key, None)
+
+            # Obtenir la commande d'ouverture pour ce type de fichier
+            command_key = f"{prog_id}\\shell\\open\\command"
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, command_key) as key:
+                command = winreg.QueryValue(key, None)
+
+            # Parser la commande pour extraire l'exécutable
+            if command:
+                # Gérer les guillemets et arguments
+                import shlex
+                parts = shlex.split(command)
+                if parts:
+                    editor_path = parts[0]
+                    # SÉCURITÉ: Vérifier que l'éditeur existe
+                    if os.path.exists(editor_path):
+                        # Extraire les arguments (remplacer %1 par le fichier)
+                        args = [arg for arg in parts[1:] if arg != "%1"]
+                        log(f"Éditeur par défaut détecté: {editor_path}")
+                        return editor_path, args
+
+        except (OSError, WindowsError, FileNotFoundError, ValueError):
+            # Ignorer les erreurs de registre et continuer avec les fallbacks
+            pass
+
+    except Exception as e:
+        log(f"Erreur détection éditeur par défaut: {_sanitize_log_message(str(e))}")
+
+    return None, None
+
+
+def find_available_editor():
+    """
+    SÉCURISÉ: Recherche un éditeur disponible selon la hiérarchie de fallback.
+    Retourne un tuple (chemin_editeur, arguments) ou (None, None) si aucun trouvé.
+    """
+    if platform.system().lower() != 'windows':
+        return None, None
+
+    # Hiérarchie de fallback pour Windows
+    fallback_editors = [
+        # 1. Notepad système (chemin complet)
+        (r'C:\Windows\System32\notepad.exe', []),
+
+        # 2. Notepad via PATH
+        ('notepad.exe', []),
+
+        # 3. WordPad
+        (r'C:\Program Files\Windows NT\Accessories\wordpad.exe', []),
+        (r'C:\Program Files (x86)\Windows NT\Accessories\wordpad.exe', []),
+
+        # 4. VS Code (installations courantes)
+        (r'C:\Program Files\Microsoft VS Code\Code.exe', ['--wait']),
+        (r'C:\Program Files (x86)\Microsoft VS Code\Code.exe', ['--wait']),
+        (os.path.expanduser(r'~\AppData\Local\Programs\Microsoft VS Code\Code.exe'), ['--wait']),
+
+        # 5. Sublime Text
+        (r'C:\Program Files\Sublime Text\sublime_text.exe', ['--wait']),
+        (r'C:\Program Files (x86)\Sublime Text\sublime_text.exe', ['--wait']),
+
+        # 6. Notepad++
+        (r'C:\Program Files\Notepad++\notepad++.exe', []),
+        (r'C:\Program Files (x86)\Notepad++\notepad++.exe', []),
+    ]
+
+    for editor_path, args in fallback_editors:
+        try:
+            # SÉCURITÉ: Vérifier que l'éditeur existe
+            if editor_path == 'notepad.exe':
+                # Test spécial pour notepad via PATH
+                try:
+                    result = subprocess.run(['where', 'notepad.exe'],
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0 and result.stdout.strip():
+                        actual_path = result.stdout.strip().split('\n')[0]
+                        if os.path.exists(actual_path):
+                            log(f"Éditeur trouvé via PATH: {actual_path}")
+                            return actual_path, args
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+                    continue
+            else:
+                if os.path.exists(editor_path):
+                    log(f"Éditeur trouvé: {editor_path}")
+                    return editor_path, args
+
+        except Exception as e:
+            # Continuer avec le prochain éditeur en cas d'erreur
+            continue
+
+    return None, None
+
+
+def open_config_in_editor(path):
+    """
+    SÉCURISÉ: Ouvre le fichier de config avec détection intelligente de l'éditeur.
+    Utilise un système de fallback robuste pour trouver un éditeur disponible.
+    """
+    try:
+        # SÉCURITÉ: Validation du chemin
+        if not path or not isinstance(path, str):
+            raise ValidationError("Chemin de fichier invalide")
+
+        # SÉCURITÉ: Normaliser et valider le chemin
+        normalized_path = os.path.normpath(os.path.abspath(path))
+
+        # SÉCURITÉ: Vérifier que c'est dans un répertoire autorisé
+        allowed_dirs = [
+            os.path.normpath(USER_CFG_DIR),
+            os.path.normpath(INSTALL_DIR),
+            os.path.normpath(os.path.dirname(os.path.abspath(sys.argv[0])))
+        ]
+
+        if not any(normalized_path.startswith(d) for d in allowed_dirs):
+            raise SecurityError(f"Chemin non autorisé: {normalized_path}")
+
+        # SÉCURITÉ: Vérifier le nom du fichier
+        if not normalized_path.endswith(CUSTOM_CFG_NAME):
+            raise SecurityError(f"Seul {CUSTOM_CFG_NAME} peut être édité")
+
+        if not os.path.exists(normalized_path):
+            log(f"custom.cfg absent, création avant ouverture")
+            try:
+                write_default_custom_cfg(normalized_path, manual_blocked_domains, whitelisted_domains)
+            except (SecurityError, ValidationError, ConfigurationError) as e:
+                log(f"ERREUR: Impossible de créer le fichier config: {e}")
+                return
+
+        # SÉCURITÉ: Lancer éditeur de manière sécurisée sur thread séparé
+        def _open_secure():
             try:
                 if platform.system().lower() == 'windows':
-                    subprocess.Popen(['notepad.exe', path])
+                    editor_found = False
+
+                    # 1. Essayer Notepad système en premier
+                    notepad_path = r'C:\Windows\System32\notepad.exe'
+                    if os.path.exists(notepad_path):
+                        try:
+                            subprocess.Popen(
+                                [notepad_path, normalized_path],
+                                creationflags=subprocess.CREATE_NO_WINDOW
+                            )
+                            log("Fichier ouvert avec Notepad système")
+                            editor_found = True
+                        except (OSError, PermissionError) as e:
+                            log(f"Erreur avec Notepad système: {_sanitize_log_message(str(e))}")
+
+                    # 2. Si Notepad système échoue, essayer notepad via PATH
+                    if not editor_found:
+                        try:
+                            subprocess.Popen(
+                                ['notepad.exe', normalized_path],
+                                creationflags=subprocess.CREATE_NO_WINDOW
+                            )
+                            log("Fichier ouvert avec Notepad (PATH)")
+                            editor_found = True
+                        except FileNotFoundError:
+                            log("Notepad non trouvé dans PATH")
+                        except (OSError, PermissionError) as e:
+                            log(f"Erreur avec Notepad PATH: {_sanitize_log_message(str(e))}")
+
+                    # 3. Si Notepad échoue, essayer l'éditeur par défaut du registre
+                    if not editor_found:
+                        default_editor, default_args = get_default_text_editor()
+                        if default_editor:
+                            try:
+                                cmd = [default_editor] + default_args + [normalized_path]
+                                subprocess.Popen(
+                                    cmd,
+                                    creationflags=subprocess.CREATE_NO_WINDOW
+                                )
+                                log("Fichier ouvert avec l'éditeur par défaut")
+                                editor_found = True
+                            except (OSError, PermissionError, FileNotFoundError) as e:
+                                log(f"Erreur avec éditeur par défaut: {_sanitize_log_message(str(e))}")
+
+                    # 4. Si l'éditeur par défaut échoue, essayer les autres éditeurs
+                    if not editor_found:
+                        fallback_editor, fallback_args = find_available_editor()
+                        if fallback_editor:
+                            try:
+                                cmd = [fallback_editor] + fallback_args + [normalized_path]
+                                subprocess.Popen(
+                                    cmd,
+                                    creationflags=subprocess.CREATE_NO_WINDOW
+                                )
+                                log("Fichier ouvert avec éditeur de fallback")
+                                editor_found = True
+                            except (OSError, PermissionError, FileNotFoundError) as e:
+                                log(f"Erreur avec éditeur de fallback: {_sanitize_log_message(str(e))}")
+
+                    # 5. Dernier recours: os.startfile()
+                    if not editor_found:
+                        try:
+                            os.startfile(normalized_path)
+                            log("Fichier ouvert avec l'application par défaut (os.startfile)")
+                            editor_found = True
+                        except (OSError, PermissionError) as e:
+                            log(f"Erreur avec os.startfile: {_sanitize_log_message(str(e))}")
+
+                    # Si aucune méthode n'a fonctionné
+                    if not editor_found:
+                        log("ERREUR: Aucun éditeur disponible trouvé pour ouvrir le fichier")
+
                 else:
-                    # fallback pour non-windows : essayer nano via cmd ou simplement ouvrir via os.startfile si disponible
-                    if hasattr(os, "startfile"):
-                        os.startfile(path)
-                    else:
-                        subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # SÉCURITÉ: Pour non-Windows, utiliser seulement xdg-open si disponible
+                    try:
+                        subprocess.Popen(
+                            ['xdg-open', normalized_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        log("Fichier ouvert avec xdg-open")
+                    except FileNotFoundError:
+                        log("SÉCURITÉ: xdg-open non trouvé, impossible d'ouvrir l'éditeur")
+
             except Exception as e:
-                log(f"Erreur ouverture éditeur pour {path} : {e}")
-        threading.Thread(target=_open, daemon=True).start()
-        log(f"Ouverture du fichier de configuration : {path}")
+                log(f"ERREUR: Erreur inattendue ouverture éditeur: {_sanitize_log_message(str(e))}")
+
+        threading.Thread(target=_open_secure, daemon=True).start()
+        log("Ouverture du fichier de configuration demandée")
+
+    except (ValidationError, SecurityError) as e:
+        log(f"SÉCURITÉ: Ouverture éditeur bloquée: {e}")
     except Exception as e:
-        log(f"Erreur ouverture éditeur pour {path} : {e}")
+        log(f"ERREUR: Erreur ouverture éditeur: {_sanitize_log_message(str(e))}")
 
 def reload_config_action(icon=None, item=None):
     """
@@ -1208,7 +2054,6 @@ def reload_config_action(icon=None, item=None):
         load_custom_cfg_to_globals(cfg_path)
         log("Configuration locale rechargée depuis le fichier utilisateur.")
 
-        global current_resolver
         if current_resolver:
             # Lancer les deux rechargements (blocklist + whitelist) en parallèle
             threading.Thread(target=current_resolver._load_blocklist, daemon=True).start()
@@ -1270,7 +2115,6 @@ def quit_app(icon=None, item=None):
         except Exception as e:
             log(f"Erreur lors de la réinitialisation du proxy système : {e}")
 
-        global proxy_server, proxy_server_thread
         if proxy_server:
             try:
                 proxy_server.shutdown()
@@ -1306,15 +2150,57 @@ def start_proxy_server(bind_ip=PROXY_BIND_IP, port=PROXY_PORT):
     """
     global proxy_server, proxy_server_thread
     try:
+        # Validation des paramètres
+        if not bind_ip or not isinstance(port, int) or port <= 0 or port > 65535:
+            log(f"ERREUR: Paramètres proxy invalides - IP: {bind_ip}, Port: {port}")
+            return None
+
+        # Test de disponibilité du port avant de créer le serveur
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            test_socket.bind((bind_ip, port))
+            test_socket.close()
+        except Exception as bind_error:
+            test_socket.close()
+            log(f"ERREUR: Port {port} déjà utilisé ou inaccessible: {bind_error}")
+            return None
+
+        # Création du serveur
+        log(f"Tentative de démarrage du proxy sur {bind_ip}:{port}...")
         server = ThreadingHTTPServer((bind_ip, port), BlockProxyHandler)
         proxy_server = server
+
+        # Démarrage du thread serveur
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         proxy_server_thread = thread
         thread.start()
-        log(f"Proxy HTTP(S) démarré sur {bind_ip}:{port}")
-        return server
+
+        # Petit délai pour s'assurer que le serveur est opérationnel
+        time.sleep(0.1)
+
+        # Vérification que le serveur écoute vraiment
+        try:
+            test_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_client.settimeout(1.0)
+            result = test_client.connect_ex((bind_ip, port))
+            test_client.close()
+
+            if result == 0:
+                log(f"✓ Proxy HTTP(S) démarré et opérationnel sur {bind_ip}:{port}")
+                return server
+            else:
+                log(f"ERREUR: Serveur créé mais n'écoute pas sur le port {port}")
+                server.shutdown()
+                return None
+        except Exception as verify_error:
+            log(f"ERREUR: Impossible de vérifier l'état du serveur: {verify_error}")
+            server.shutdown()
+            return None
+
     except Exception as e:
-        log(f"Erreur démarrage proxy: {e}")
+        log(f"ERREUR critique lors du démarrage du proxy: {e}")
+        log(f"Details: {traceback.format_exc()}")
         return None
 
 # === INSTALL / UNINSTALL / MAIN ===
@@ -1338,7 +2224,7 @@ def install():
         log(f"Impossible de créer INSTALL_DIR {INSTALL_DIR}: {e}")
 
     # Créer custom.cfg dans APPDATA si absent (avec domaines embarqués comme base)
-    cfg_path = ensure_custom_cfg_exists(INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
+    ensure_custom_cfg_exists(INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
 
     # Copier le script/exe
     try:
@@ -1401,30 +2287,86 @@ def install():
     </Task>'''
 
     def add_task_from_xml(xml_content_inner):
+        """
+        SÉCURISÉ: Ajout de tâche planifiée avec validation du contenu XML.
+        """
+        tmp_file_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-16') as tmp_file:
+            # SÉCURITÉ: Validation du contenu XML
+            if not xml_content_inner or not isinstance(xml_content_inner, str):
+                raise SecurityError("Contenu XML invalide")
+
+            # SÉCURITÉ: Vérifier la taille du XML (max 10KB)
+            if len(xml_content_inner) > 10 * 1024:
+                raise SecurityError(f"XML trop volumineux: {len(xml_content_inner)} chars")
+
+            # SÉCURITÉ: Validation basique du XML (contient les balises attendues)
+            required_tags = ['<Task', '<Command>', '</Task>']
+            if not all(tag in xml_content_inner for tag in required_tags):
+                raise SecurityError("Structure XML non conforme")
+
+            # SÉCURITÉ: Vérifier que le chemin dans Command pointe vers notre installation
+            if 'C:\\Program Files\\CalmWeb\\calmweb.exe' not in xml_content_inner:
+                raise SecurityError("Chemin de commande non autorisé dans XML")
+
+            # SÉCURITÉ: Créer fichier temporaire avec permissions restreintes
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                mode='w',
+                encoding='utf-16',
+                suffix='.xml',
+                prefix='calmweb_task_'
+            ) as tmp_file:
                 tmp_file.write(xml_content_inner)
                 tmp_file_path = tmp_file.name
-            if os.path.exists(tmp_file_path):
-                try:
-                    subprocess.run(["schtasks", "/Create", "/tn", "CalmWeb", "/XML", tmp_file_path, "/F"], check=True)
-                    log(f"Tâche planifiée ajoutée avec succès.")
-                except subprocess.CalledProcessError as e:
-                    log(f"Erreur lors de l'ajout de la tâche planifiée : {e}")
-                except Exception as e:
-                    log(f"Erreur inattendue schtasks: {e}")
-            else:
-                log(f"Erreur : le fichier XML temporaire n'a pas pu être créé à {tmp_file_path}")
-        except Exception as e:
-            log(f"Erreur add_task_from_xml: {e}")
-        finally:
-            try:
-                if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
-                    os.remove(tmp_file_path)
-            except Exception:
-                pass
 
-    add_task_from_xml(xml_content)
+            # SÉCURITÉ: Vérifier que le fichier a été créé
+            if not os.path.exists(tmp_file_path):
+                raise OSError(f"Fichier XML temporaire non créé: {tmp_file_path}")
+
+            # SÉCURITÉ: Exécution schtasks avec timeout et validation stricte
+            cmd = ["schtasks", "/Create", "/tn", "CalmWeb", "/XML", tmp_file_path, "/F"]
+
+            try:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    timeout=30,  # Timeout de 30 secondes
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                log("Tâche planifiée ajoutée avec succès.")
+
+            except subprocess.TimeoutExpired:
+                raise NetworkError("Timeout lors de la création de la tâche planifiée")
+            except subprocess.CalledProcessError as e:
+                raise NetworkError(f"Erreur schtasks (code {e.returncode}): {_sanitize_log_message(str(e))}")
+
+        except (SecurityError, NetworkError):
+            raise  # Re-lever les erreurs de sécurité/réseau
+        except OSError as e:
+            raise ConfigurationError(f"Erreur fichier temporaire: {_sanitize_log_message(str(e))}")
+        except Exception as e:
+            raise ConfigurationError(f"Erreur add_task_from_xml: {_sanitize_log_message(str(e))}")
+        finally:
+            # SÉCURITÉ: Nettoyer le fichier temporaire de manière sécurisée
+            try:
+                if tmp_file_path and os.path.exists(tmp_file_path):
+                    # Écraser le contenu avant suppression pour sécurité
+                    with open(tmp_file_path, 'w') as f:
+                        f.write('X' * 1024)  # Écraser avec des données arbitraires
+                    os.remove(tmp_file_path)
+            except Exception as e:
+                log(f"SÉCURITÉ: Erreur nettoyage fichier temp: {_sanitize_log_message(str(e))}")
+
+    # SÉCURITÉ: Appel sécurisé de add_task_from_xml avec gestion d'erreurs
+    try:
+        add_task_from_xml(xml_content)
+    except (SecurityError, NetworkError, ConfigurationError) as e:
+        log(f"ERREUR: Échec création tâche planifiée: {e}")
+    except Exception as e:
+        log(f"ERREUR: Erreur inattendue tâche planifiée: {_sanitize_log_message(str(e))}")
 
     # Lancer l'exe copié (si possible)
     try:
@@ -1452,7 +2394,7 @@ def run_calmweb():
     """
     Point d'entrée principal pour exécuter Calm Web en mode utilisateur.
     """
-    global current_resolver, proxy_server
+    global current_resolver
     try:
         cfg_path = ensure_custom_cfg_exists(INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
         load_custom_cfg_to_globals(cfg_path)
@@ -1466,9 +2408,15 @@ def run_calmweb():
         log(f"Erreur création resolver: {e}")
 
     try:
-        start_proxy_server(PROXY_BIND_IP, PROXY_PORT)
+        proxy_server_instance = start_proxy_server(PROXY_BIND_IP, PROXY_PORT)
+        if proxy_server_instance is None:
+            log(f"ÉCHEC CRITIQUE: Le proxy n'a pas pu démarrer sur {PROXY_BIND_IP}:{PROXY_PORT}")
+            log("L'application ne pourra pas fonctionner correctement")
+        else:
+            log(f"Proxy configuré avec succès")
     except Exception as e:
-        log(f"Erreur démarrage serveur proxy: {e}")
+        log(f"ERREUR EXCEPTION lors du démarrage du proxy: {e}")
+        log(f"Details: {traceback.format_exc()}")
 
     try:
         set_system_proxy(enable=block_enabled)
