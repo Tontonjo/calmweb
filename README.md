@@ -41,13 +41,12 @@ The program will:
 - Domains manually added in the whitelist at %appdata%\calmweb\custom.cfg  
 
 ### Known problems:
-- Sandbox not working whhen calmweb is running
+- Opening and closing the log crash the program
 
 ### todo:
 Everything is subject to discussion and enhancements! Share your knolwedges.  
 - Test on windows 10
 - Ensure the proxy will not cause problms: correct stop at shutdown, multi users
-- Displaying the log crash the program
 - Enhance the program, make it perfectly stable and robust.
 - Correct encoding (some messages are displayer weirdly)
 - Configure a self-updating method
