@@ -1,4 +1,4 @@
-# Thoses domains are blocked for security reasons, if one needs to be allowed, disable in calmweb settings or add one in the whitelist
+# Those domains are blocked for security reasons; if one needs to be allowed, disable it in Calm Web settings or add it to the whitelist
 anydesk.com
 anyviewer.com
 connectwise.com
