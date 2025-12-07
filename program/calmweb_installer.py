@@ -25,12 +25,10 @@ import select
 import traceback
 import signal
 import ipaddress
-import tkinter as tk
 from collections import deque
 from datetime import datetime
 from PIL import Image, ImageDraw
 from pystray import Icon, MenuItem, Menu
-from tkinter.scrolledtext import ScrolledText
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 from urllib.parse import urlparse
@@ -65,6 +63,12 @@ RELOAD_INTERVAL = 3600
 PROXY_BIND_IP = "127.0.0.1"
 PROXY_PORT = 8080
 
+# Resource/connection safety limits
+MAX_BLOCKLIST_BYTES = 25 * 1024 * 1024   # skip any blocklist download larger than this
+MAX_PROXY_CONNECTIONS = 200              # cap concurrent proxy threads
+SOCKET_IDLE_TIMEOUT = 90                 # seconds before dropping idle relays
+MAX_BLOCKED_DOMAINS = 1_500_000          # guardrail to avoid unbounded memory use
+
 INSTALL_DIR = r"C:\Program Files\CalmWeb"
 EXE_NAME = "calmweb.exe"
 STARTUP_FOLDER = os.getenv('APPDATA', '') + r"\Microsoft\Windows\Start Menu\Programs\Startup"
@@ -89,6 +93,7 @@ proxy_server_thread = None
 _RESOLVER_LOADING = threading.Event()
 _SHUTDOWN_EVENT = threading.Event()
 _CONFIG_LOCK = threading.RLock()
+_CONNECTION_SEMAPHORE = threading.BoundedSemaphore(MAX_PROXY_CONNECTIONS)
 
 # === Logging ===
 _LOG_LOCK = threading.Lock()
@@ -465,6 +470,7 @@ class BlocklistResolver:
             try:
                 domains = set()
                 http = urllib3.PoolManager(cert_reqs='CERT_REQUIRED', ssl_context=ssl.create_default_context())
+                cap_reached = False
 
                 for url in self.blocklist_urls:
                     success = False
@@ -483,17 +489,24 @@ class BlocklistResolver:
                                     raise Exception(f"HTTP {response.status}")
                                 raw_data = response.data
 
+                            if len(raw_data) > MAX_BLOCKLIST_BYTES:
+                                raise Exception(f"Payload trop volumineux ({len(raw_data)} bytes > {MAX_BLOCKLIST_BYTES})")
+
                             # --- Si ZIP, extraction et parsing
                             if zipfile.is_zipfile(io.BytesIO(raw_data)):
                                 log(f"🗜️ Archive ZIP détectée : {url}")
                                 with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
                                     for name in zf.namelist():
+                                        if cap_reached:
+                                            break
                                         if not name.lower().endswith((".txt", ".csv", ".log")):
                                             continue
                                         log(f"   → Lecture {name} dans l’archive ZIP")
                                         content = zf.read(name).decode("utf-8", errors="ignore")
 
                                         for line in content.splitlines():
+                                            if cap_reached:
+                                                break
                                             if not line or line.startswith("#"):
                                                 continue
                                             # --- Format CSV (ex: URLHaus)
@@ -529,6 +542,8 @@ class BlocklistResolver:
                                 # --- Fichier texte classique
                                 content = raw_data.decode("utf-8", errors="ignore")
                                 for line in content.splitlines():
+                                    if cap_reached:
+                                        break
                                     line = line.split("#", 1)[0].strip()
                                     if not line:
                                         continue
@@ -544,10 +559,14 @@ class BlocklistResolver:
                                     if not domain:
                                         continue
                                     domain = domain.lower().lstrip(".")
-                                    if not domain or len(domain) > 253:
-                                        continue
-                                    if not self._looks_like_ip(domain):
-                                        domains.add(domain)
+                                                if not domain or len(domain) > 253:
+                                                    continue
+                                                if not self._looks_like_ip(domain):
+                                                    domains.add(domain)
+                                                    if len(domains) >= MAX_BLOCKED_DOMAINS:
+                                                        cap_reached = True
+                                                        log(f"⚠️ Limite de domaines atteinte ({MAX_BLOCKED_DOMAINS}), troncature.")
+                                                        break
 
                             success = True
                             break
@@ -558,6 +577,8 @@ class BlocklistResolver:
 
                     if not success:
                         log(f"[⚠️] Échec téléchargement blocklist depuis {url}")
+                    if cap_reached:
+                        break
 
                 # --- Mise à jour atomique de la blocklist
                 with self._lock:
@@ -841,6 +862,10 @@ def _set_socket_opts_for_perf(sock):
         if platform.system().lower() == 'windows':
             # tuple: (on/off, keepalive_time_ms, keepalive_interval_ms)
             sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 60000, 10000))
+        try:
+            sock.settimeout(SOCKET_IDLE_TIMEOUT)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -852,6 +877,8 @@ def _relay_worker(src, dst, buffer_size=65536):
         while not _SHUTDOWN_EVENT.is_set():
             try:
                 data = src.recv(buffer_size)
+            except socket.timeout:
+                break
             except Exception:
                 break
             if not data:
@@ -931,8 +958,11 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                     conn = self.connection
                     _set_socket_opts_for_perf(conn)
                     _set_socket_opts_for_perf(remote)
-                    conn.settimeout(None)
-                    remote.settimeout(None)
+                    try:
+                        conn.settimeout(SOCKET_IDLE_TIMEOUT)
+                        remote.settimeout(SOCKET_IDLE_TIMEOUT)
+                    except Exception:
+                        pass
                     conn.setblocking(True)
                     remote.setblocking(True)
                     full_duplex_relay(conn, remote)
@@ -988,8 +1018,11 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             conn = self.connection
             _set_socket_opts_for_perf(conn)
             _set_socket_opts_for_perf(remote)
-            conn.settimeout(None)
-            remote.settimeout(None)
+            try:
+                conn.settimeout(SOCKET_IDLE_TIMEOUT)
+                remote.settimeout(SOCKET_IDLE_TIMEOUT)
+            except Exception:
+                pass
             conn.setblocking(True)
             remote.setblocking(True)
             full_duplex_relay(conn, remote)
@@ -1105,8 +1138,11 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             _set_socket_opts_for_perf(remote)
 
             # Retirer timeout après connexion
-            self.connection.settimeout(None)
-            remote.settimeout(None)
+            try:
+                self.connection.settimeout(SOCKET_IDLE_TIMEOUT)
+                remote.settimeout(SOCKET_IDLE_TIMEOUT)
+            except Exception:
+                pass
             self.connection.setblocking(True)
             remote.setblocking(True)
 
@@ -1145,68 +1181,30 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): return  # silence
 
 
-# === GUI (tkinter logging window) ===
+# === Log viewer (safe snapshot) ===
 def show_log_window():
     """
-    Fenêtre Tk qui affiche le log_buffer et se met à jour.
+    Écrit un snapshot du log dans un fichier et l'ouvre dans l'éditeur par défaut.
+    Évite Tkinter (non thread-safe) pour ne pas provoquer de crash.
     """
     try:
-        win = tk.Tk()
+        os.makedirs(USER_CFG_DIR, exist_ok=True)
+        log_path = os.path.join(USER_CFG_DIR, "calmweb_log.txt")
+        with _LOG_LOCK:
+            snapshot = '\n'.join(log_buffer)
+        with open(log_path, 'w', encoding='utf-8', errors='ignore') as f:
+            f.write(snapshot)
+
+        if platform.system().lower() == 'windows':
+            subprocess.Popen(['notepad.exe', log_path])
+        else:
+            if hasattr(os, "startfile"):
+                os.startfile(log_path)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(['xdg-open', log_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log(f"Log sauvegardé dans {log_path}")
     except Exception as e:
-        log(f"Impossible d'ouvrir Tkinter: {e}")
-        return
-    win.title("Calm Web - Journal d’activité")
-    win.geometry("700x400")
-    text_area = ScrolledText(win, wrap=tk.WORD)
-    text_area.pack(expand=True, fill='both')
-    text_area.config(state='disabled')
-
-    refresh_job = None
-    closed = False
-
-    def close_window():
-        nonlocal refresh_job, closed
-        if closed:
-            return
-        closed = True
-        try:
-            if refresh_job:
-                try:
-                    win.after_cancel(refresh_job)
-                except Exception:
-                    pass
-            win.destroy()
-        except Exception:
-            pass
-
-    win.protocol("WM_DELETE_WINDOW", close_window)
-
-    def refresh_log():
-        nonlocal refresh_job, closed
-        if closed or _SHUTDOWN_EVENT.is_set():
-            close_window()
-            return
-        try:
-            if not win.winfo_exists():
-                close_window()
-                return
-            text_area.config(state='normal')
-            with _LOG_LOCK:
-                text_area.delete(1.0, tk.END)
-                text_area.insert(tk.END, '\n'.join(log_buffer))
-            text_area.see(tk.END)
-            text_area.config(state='disabled')
-        except Exception:
-            # Si la fenêtre est détruite pendant l'update, on arrête la boucle
-            close_window()
-            return
-        refresh_job = win.after(1000, refresh_log)
-
-    refresh_log()
-    try:
-        win.mainloop()
-    except Exception:
-        pass
+        log(f"Impossible d'ouvrir le log : {e}")
 
 
 def create_image():
@@ -1354,13 +1352,42 @@ def quit_app(icon=None, item=None):
         log(f"Erreur lors de l'arrêt de l'application : {e}")
 
 # === PROXY SERVER MANAGEMENT ===
+class LimitedThreadingHTTPServer(ThreadingHTTPServer):
+    """
+    ThreadingHTTPServer avec limite de connexions actives via sémaphore.
+    Empêche la croissance infinie du nombre de threads si des clients restent ouverts.
+    """
+    daemon_threads = True
+
+    def process_request(self, request, client_address):
+        acquired = _CONNECTION_SEMAPHORE.acquire(blocking=False)
+        if not acquired:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                request.close()
+            except Exception:
+                pass
+            log("❌ Trop de connexions actives, requête refusée.")
+            return
+        return super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            _CONNECTION_SEMAPHORE.release()
+
+
 def start_proxy_server(bind_ip=PROXY_BIND_IP, port=PROXY_PORT):
     """
     Démarre ThreadingHTTPServer et retourne l'objet serveur; renvoie None en cas d'erreur.
     """
     global proxy_server, proxy_server_thread
     try:
-        server = ThreadingHTTPServer((bind_ip, port), BlockProxyHandler)
+        server = LimitedThreadingHTTPServer((bind_ip, port), BlockProxyHandler)
         proxy_server = server
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         proxy_server_thread = thread
