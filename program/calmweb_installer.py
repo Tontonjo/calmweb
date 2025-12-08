@@ -4,34 +4,37 @@
 # Tonton Jo - 2025
 # Join me on Youtube: https://www.youtube.com/c/tontonjo
 
+from urllib.parse import urlparse
+import urllib.parse
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pystray import Icon, MenuItem, Menu
+from PIL import Image, ImageDraw
+from datetime import datetime
+from collections import deque
+import ipaddress
+import tkinter as tk
+from tkinter.scrolledtext import ScrolledText
+import signal
+import traceback
+import select
+import csv
+import io
+import zipfile
+import ctypes
+import urllib3
+import ssl
+import socket
+import platform
+import subprocess
+import threading
+import time
+import tempfile
+import sys
+import shutil
+import os
+import webbrowser
 calmweb_version = "1.1.1"
 
-import os
-import shutil
-import sys
-import tempfile
-import time
-import threading
-import subprocess
-import platform
-import socket
-import ssl
-import urllib3
-import ctypes
-import zipfile
-import io
-import csv
-import select
-import traceback
-import signal
-import ipaddress
-from collections import deque
-from datetime import datetime
-from PIL import Image, ImageDraw
-from pystray import Icon, MenuItem, Menu
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-import urllib.parse
-from urllib.parse import urlparse
 
 # Optional Windows-only imports: encapsulées pour éviter crash si non disponibles
 try:
@@ -64,20 +67,29 @@ PROXY_BIND_IP = "127.0.0.1"
 PROXY_PORT = 8080
 
 # Resource/connection safety limits
-MAX_BLOCKLIST_BYTES = 25 * 1024 * 1024   # skip any blocklist download larger than this
+# skip any blocklist download larger than this
+MAX_BLOCKLIST_BYTES = 25 * 1024 * 1024
 MAX_PROXY_CONNECTIONS = 200              # cap concurrent proxy threads
 SOCKET_IDLE_TIMEOUT = 90                 # seconds before dropping idle relays
-MAX_BLOCKED_DOMAINS = 1_500_000          # guardrail to avoid unbounded memory use
+# guardrail to avoid unbounded memory use
+MAX_BLOCKED_DOMAINS = 1_500_000
+# truncate persisted log if it grows too big
+MAX_LOG_FILE_BYTES = 5 * 1024 * 1024
+MAX_LOG_FILE_LINES = 4000
 
 INSTALL_DIR = r"C:\Program Files\CalmWeb"
 EXE_NAME = "calmweb.exe"
-STARTUP_FOLDER = os.getenv('APPDATA', '') + r"\Microsoft\Windows\Start Menu\Programs\Startup"
+STARTUP_FOLDER = os.getenv('APPDATA', '') + \
+    r"\Microsoft\Windows\Start Menu\Programs\Startup"
 CUSTOM_CFG_NAME = "custom.cfg"
 
-USER_CFG_DIR = os.path.join(os.getenv('APPDATA') or os.path.expanduser("~"), "CalmWeb")
+USER_CFG_DIR = os.path.join(
+    os.getenv('APPDATA') or os.path.expanduser("~"), "CalmWeb")
 USER_CFG_PATH = os.path.join(USER_CFG_DIR, CUSTOM_CFG_NAME)
+LOG_FILE_PATH = os.path.join(USER_CFG_DIR, "calmweb_log.txt")
 RED_FLAG_CACHE_PATH = os.path.join(USER_CFG_DIR, "red_flag_domains.txt")
-RED_FLAG_TIMESTAMP_PATH = os.path.join(USER_CFG_DIR, "red_flag_last_update.txt")
+RED_FLAG_TIMESTAMP_PATH = os.path.join(
+    USER_CFG_DIR, "red_flag_last_update.txt")
 
 # Global state
 block_enabled = True
@@ -98,18 +110,22 @@ _CONNECTION_SEMAPHORE = threading.BoundedSemaphore(MAX_PROXY_CONNECTIONS)
 # === Logging ===
 _LOG_LOCK = threading.Lock()
 
+
 def _safe_str(obj):
     """Safely convert object to string."""
     try:
         return str(obj)
     except Exception:
         return f"<{type(obj).__name__} object>"
+
+
 def log(msg):
     try:
         timestamp = time.strftime("[%H:%M:%S]")
         try:
             # Force conversion str + remplacement erreurs unicode
-            safe_msg = str(msg).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+            safe_msg = str(msg).encode(
+                "utf-8", errors="replace").decode("utf-8", errors="replace")
         except Exception:
             safe_msg = "Log message conversion error"
 
@@ -118,6 +134,22 @@ def log(msg):
         with _LOG_LOCK:
             # Ajout dans buffer (deque gère automatiquement la taille max)
             log_buffer.append(line)
+
+            # Persistance disque avec troncature simple pour éviter gonflement
+            try:
+                os.makedirs(USER_CFG_DIR, exist_ok=True)
+                if os.path.exists(LOG_FILE_PATH) and os.path.getsize(LOG_FILE_PATH) > MAX_LOG_FILE_BYTES:
+                    try:
+                        with open(LOG_FILE_PATH, 'r', encoding='utf-8', errors='ignore') as lf:
+                            tail_lines = deque(lf, maxlen=MAX_LOG_FILE_LINES)
+                        with open(LOG_FILE_PATH, 'w', encoding='utf-8', errors='ignore') as lf:
+                            lf.writelines(tail_lines)
+                    except Exception:
+                        pass
+                with open(LOG_FILE_PATH, 'a', encoding='utf-8', errors='ignore') as lf:
+                    lf.write(line + "\n")
+            except Exception:
+                pass
 
             # Affichage console protégé
             try:
@@ -164,7 +196,8 @@ def get_exe_icon(path, size=(64, 64)):
         hbmp = win32ui.CreateBitmap()
         hbmp.CreateCompatibleBitmap(hdc, size[0], size[1])
         hdc_mem.SelectObject(hbmp)
-        win32gui.DrawIconEx(hdc_mem.GetSafeHdc(), 0, 0, hicon, size[0], size[1], 0, 0, win32con.DI_NORMAL)
+        win32gui.DrawIconEx(hdc_mem.GetSafeHdc(), 0, 0, hicon,
+                            size[0], size[1], 0, 0, win32con.DI_NORMAL)
         bmpinfo = hbmp.GetInfo()
         bmpstr = hbmp.GetBitmapBits(True)
         img = Image.frombuffer(
@@ -189,6 +222,8 @@ def get_exe_icon(path, size=(64, 64)):
     return img
 
 # === Custom config handling ===
+
+
 def get_custom_cfg_path(install_dir=None):
     """
     Retourne le chemin du custom.cfg: priorise APPDATA, sinon install_dir, sinon dossier courant.
@@ -201,6 +236,7 @@ def get_custom_cfg_path(install_dir=None):
     if install_dir and os.path.isdir(install_dir):
         return os.path.join(install_dir, CUSTOM_CFG_NAME)
     return os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), CUSTOM_CFG_NAME)
+
 
 def write_default_custom_cfg(path, blocked_set, whitelist_set):
     """
@@ -302,6 +338,7 @@ def parse_custom_cfg(path):
 
     return blocked, whitelist
 
+
 def ensure_custom_cfg_exists(install_dir, default_blocked, default_whitelist):
     """
     Assure l'existence d'un custom.cfg dans APPDATA prioritairement, sinon dans le dossier d'installation.
@@ -311,17 +348,20 @@ def ensure_custom_cfg_exists(install_dir, default_blocked, default_whitelist):
         if not os.path.isdir(USER_CFG_DIR):
             os.makedirs(USER_CFG_DIR, exist_ok=True)
         if not os.path.exists(USER_CFG_PATH):
-            write_default_custom_cfg(USER_CFG_PATH, default_blocked, default_whitelist)
+            write_default_custom_cfg(
+                USER_CFG_PATH, default_blocked, default_whitelist)
         return USER_CFG_PATH
     except Exception as e:
         log(f"Erreur ensure_custom_cfg_exists (APPDATA): {e}")
     cfg_path = get_custom_cfg_path(install_dir)
     if not os.path.exists(cfg_path):
         try:
-            write_default_custom_cfg(cfg_path, default_blocked, default_whitelist)
+            write_default_custom_cfg(
+                cfg_path, default_blocked, default_whitelist)
         except Exception as e:
             log(f"Erreur écriture fallback custom.cfg {cfg_path}: {e}")
     return cfg_path
+
 
 def load_custom_cfg_to_globals(path):
     """
@@ -337,6 +377,8 @@ def load_custom_cfg_to_globals(path):
     return manual_blocked_domains, whitelisted_domains
 
 # === Red Flag Domains Auto-Update ===
+
+
 def should_update_red_flag_domains():
     """Vérifie si red.flag.domains doit être mis à jour (quotidien)"""
     try:
@@ -355,6 +397,7 @@ def should_update_red_flag_domains():
     except Exception as e:
         log(f"Erreur vérification timestamp red.flag.domains: {e}")
         return True
+
 
 def download_red_flag_domains():
     """Télécharge et cache red.flag.domains localement"""
@@ -384,12 +427,14 @@ def download_red_flag_domains():
             log(f"✅ red.flag.domains mis à jour ({len(response.data)} bytes)")
             return True
         else:
-            log(f"❌ Échec téléchargement red.flag.domains: HTTP {response.status}")
+            log(
+                f"❌ Échec téléchargement red.flag.domains: HTTP {response.status}")
             return False
 
     except Exception as e:
         log(f"❌ Erreur téléchargement red.flag.domains: {e}")
         return False
+
 
 def get_red_flag_domains_path():
     """Retourne le chemin vers le fichier red.flag.domains (cache local ou URL)"""
@@ -403,6 +448,7 @@ def get_red_flag_domains_path():
     # Fallback vers l'URL directe
     return "https://dl.red.flag.domains/pihole/red.flag.domains.txt"
 
+
 def get_blocklist_urls():
     """Retourne la liste des URLs de blocklist avec red.flag.domains mis à jour automatiquement"""
     return [
@@ -415,10 +461,13 @@ def get_blocklist_urls():
         get_red_flag_domains_path()
     ]
 
+
 # Initialisation des URLs de blocklist
 BLOCKLIST_URLS = get_blocklist_urls()
 
 # === Firewall / Proxy ===
+
+
 def add_firewall_rule(target_file):
     """
     Tente d'ajouter une règle de pare-feu via netsh. Capture erreurs.
@@ -451,7 +500,8 @@ class BlocklistResolver:
         # - whitelisted_domains: noms de domaines / hôtes (string)
         # - whitelisted_networks: objets ip_network pour CIDR
         # Les deux sont protégées par self._lock
-        self.whitelisted_domains_local = set()   # non-global copy; on fusionnera avec global si nécessaire
+        # non-global copy; on fusionnera avec global si nécessaire
+        self.whitelisted_domains_local = set()
         self.whitelisted_networks = set()       # set(ipaddress.ip_network(...))
 
         # Chargement initial (tolérant)
@@ -460,7 +510,7 @@ class BlocklistResolver:
             self._load_whitelist()
         except Exception as e:
             log(f"BlocklistResolver init error: {e}")
-            
+
     def _load_blocklist(self):
         if self._loading_lock.locked():
             log("Blocklist load déjà en cours, skip.")
@@ -469,14 +519,16 @@ class BlocklistResolver:
             _RESOLVER_LOADING.set()
             try:
                 domains = set()
-                http = urllib3.PoolManager(cert_reqs='CERT_REQUIRED', ssl_context=ssl.create_default_context())
+                http = urllib3.PoolManager(
+                    cert_reqs='CERT_REQUIRED', ssl_context=ssl.create_default_context())
                 cap_reached = False
 
                 for url in self.blocklist_urls:
                     success = False
                     for attempt in range(3):
                         try:
-                            log(f"⬇️ Chargement blocklist {url} (tentative {attempt+1})")
+                            log(
+                                f"⬇️ Chargement blocklist {url} (tentative {attempt+1})")
 
                             # --- Téléchargement ou lecture locale
                             if url.startswith("file://"):
@@ -484,13 +536,15 @@ class BlocklistResolver:
                                 with open(file_path, "rb") as f:
                                     raw_data = f.read()
                             else:
-                                response = http.request("GET", url, timeout=urllib3.Timeout(connect=5.0, read=15.0))
+                                response = http.request(
+                                    "GET", url, timeout=urllib3.Timeout(connect=5.0, read=15.0))
                                 if response.status != 200:
                                     raise Exception(f"HTTP {response.status}")
                                 raw_data = response.data
 
                             if len(raw_data) > MAX_BLOCKLIST_BYTES:
-                                raise Exception(f"Payload trop volumineux ({len(raw_data)} bytes > {MAX_BLOCKLIST_BYTES})")
+                                raise Exception(
+                                    f"Payload trop volumineux ({len(raw_data)} bytes > {MAX_BLOCKLIST_BYTES})")
 
                             # --- Si ZIP, extraction et parsing
                             if zipfile.is_zipfile(io.BytesIO(raw_data)):
@@ -502,7 +556,8 @@ class BlocklistResolver:
                                         if not name.lower().endswith((".txt", ".csv", ".log")):
                                             continue
                                         log(f"   → Lecture {name} dans l’archive ZIP")
-                                        content = zf.read(name).decode("utf-8", errors="ignore")
+                                        content = zf.read(name).decode(
+                                            "utf-8", errors="ignore")
 
                                         for line in content.splitlines():
                                             if cap_reached:
@@ -512,19 +567,25 @@ class BlocklistResolver:
                                             # --- Format CSV (ex: URLHaus)
                                             if line.startswith('"') and "," in line:
                                                 try:
-                                                    reader = csv.reader(io.StringIO(line))
+                                                    reader = csv.reader(
+                                                        io.StringIO(line))
                                                     row = next(reader)
                                                     if len(row) >= 3:
-                                                        url_candidate = row[2].strip('"').strip()
-                                                        host = urlparse(url_candidate).hostname
+                                                        url_candidate = row[2].strip(
+                                                            '"').strip()
+                                                        host = urlparse(
+                                                            url_candidate).hostname
                                                         if host:
                                                             host = host.lower()
                                                             try:
-                                                                ipaddress.ip_address(host)
-                                                                domains.add(host)
+                                                                ipaddress.ip_address(
+                                                                    host)
+                                                                domains.add(
+                                                                    host)
                                                             except ValueError:
                                                                 if len(host) <= 253:
-                                                                    domains.add(host)
+                                                                    domains.add(
+                                                                        host)
                                                 except Exception:
                                                     continue
                                             else:
@@ -532,7 +593,8 @@ class BlocklistResolver:
                                                 parts = line.split()
                                                 if not parts:
                                                     continue
-                                                domain = parts[0].strip().lower().lstrip(".")
+                                                domain = parts[0].strip(
+                                                ).lower().lstrip(".")
                                                 if not domain or len(domain) > 253:
                                                     continue
                                                 if not self._looks_like_ip(domain):
@@ -540,7 +602,8 @@ class BlocklistResolver:
 
                             else:
                                 # --- Fichier texte classique
-                                content = raw_data.decode("utf-8", errors="ignore")
+                                content = raw_data.decode(
+                                    "utf-8", errors="ignore")
                                 for line in content.splitlines():
                                     if cap_reached:
                                         break
@@ -559,14 +622,15 @@ class BlocklistResolver:
                                     if not domain:
                                         continue
                                     domain = domain.lower().lstrip(".")
-                                                if not domain or len(domain) > 253:
-                                                    continue
-                                                if not self._looks_like_ip(domain):
-                                                    domains.add(domain)
-                                                    if len(domains) >= MAX_BLOCKED_DOMAINS:
-                                                        cap_reached = True
-                                                        log(f"⚠️ Limite de domaines atteinte ({MAX_BLOCKED_DOMAINS}), troncature.")
-                                                        break
+                                    if not domain or len(domain) > 253:
+                                        continue
+                                    if not self._looks_like_ip(domain):
+                                        domains.add(domain)
+                                        if len(domains) >= MAX_BLOCKED_DOMAINS:
+                                            cap_reached = True
+                                            log(
+                                                f"⚠️ Limite de domaines atteinte ({MAX_BLOCKED_DOMAINS}), troncature.")
+                                            break
 
                             success = True
                             break
@@ -576,7 +640,8 @@ class BlocklistResolver:
                             time.sleep(1 + attempt * 2)
 
                     if not success:
-                        log(f"[⚠️] Échec téléchargement blocklist depuis {url}")
+                        log(
+                            f"[⚠️] Échec téléchargement blocklist depuis {url}")
                     if cap_reached:
                         break
 
@@ -593,7 +658,6 @@ class BlocklistResolver:
             finally:
                 _RESOLVER_LOADING.clear()
 
-
     def _load_whitelist(self):
         """
         Télécharge & parse les whitelists et met à jour self.whitelisted_domains_local et self.whitelisted_networks.
@@ -601,7 +665,8 @@ class BlocklistResolver:
         - mise à jour atomique des structures protégées par self._lock.
         """
         try:
-            http = urllib3.PoolManager(cert_reqs='CERT_REQUIRED', ssl_context=ssl.create_default_context())
+            http = urllib3.PoolManager(
+                cert_reqs='CERT_REQUIRED', ssl_context=ssl.create_default_context())
             new_domains = set()
             new_networks = set()
 
@@ -618,11 +683,14 @@ class BlocklistResolver:
             for url in WHITELIST_URLS:
                 for attempt in range(3):
                     try:
-                        log(f"⬇️ Téléchargement whitelist {url} (tentative {attempt+1})")
-                        response = http.request("GET", url, timeout=urllib3.Timeout(connect=5.0, read=10.0))
+                        log(
+                            f"⬇️ Téléchargement whitelist {url} (tentative {attempt+1})")
+                        response = http.request(
+                            "GET", url, timeout=urllib3.Timeout(connect=5.0, read=10.0))
                         if response.status != 200:
                             raise Exception(f"HTTP {response.status}")
-                        content = response.data.decode("utf-8", errors='ignore')
+                        content = response.data.decode(
+                            "utf-8", errors='ignore')
                         for line in content.splitlines():
                             try:
                                 line = line.split('#', 1)[0].strip()
@@ -638,7 +706,8 @@ class BlocklistResolver:
                                 # CIDR or IP network
                                 if '/' in entry:
                                     try:
-                                        net = ipaddress.ip_network(entry, strict=False)
+                                        net = ipaddress.ip_network(
+                                            entry, strict=False)
                                         new_networks.add(net)
                                         continue
                                     except Exception:
@@ -656,7 +725,8 @@ class BlocklistResolver:
                                 continue
                         break
                     except Exception as e:
-                        log(f"[⚠️] Loading whitelist failed {url} attempt {attempt+1}: {e}")
+                        log(
+                            f"[⚠️] Loading whitelist failed {url} attempt {attempt+1}: {e}")
                         time.sleep(1 + attempt * 2)
 
             # mise à jour atomique
@@ -813,37 +883,46 @@ def set_system_proxy(enable=True, host=PROXY_BIND_IP, port=PROXY_PORT):
         if enable:
             proxy_str = f"{host}:{port}"
             try:
-                subprocess.run(["netsh", "winhttp", "set", "proxy", proxy_str], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(["netsh", "winhttp", "set", "proxy", proxy_str],
+                               check=False, creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 # netsh peut échouer selon les permissions
                 pass
             try:
-                subprocess.run(["setx", "HTTP_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-                subprocess.run(["setx", "HTTPS_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(
+                    ["setx", "HTTP_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(
+                    ["setx", "HTTPS_PROXY", f"http://{proxy_str}"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 pass
             try:
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, proxy_str)
+                winreg.SetValueEx(key, "ProxyServer", 0,
+                                  winreg.REG_SZ, proxy_str)
                 winreg.CloseKey(key)
             except Exception as e:
                 log(f"set_system_proxy windows registry fail: {e}")
             log(f"Proxy système configuré sur {proxy_str}")
         else:
             try:
-                subprocess.run(["netsh", "winhttp", "reset", "proxy"], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(["netsh", "winhttp", "reset", "proxy"],
+                               check=False, creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 pass
             try:
-                subprocess.run(["setx", "HTTP_PROXY", ""], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
-                subprocess.run(["setx", "HTTPS_PROXY", ""], check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(["setx", "HTTP_PROXY", ""], check=False,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(["setx", "HTTPS_PROXY", ""], check=False,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
                 pass
             try:
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE)
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "")
                 winreg.CloseKey(key)
@@ -854,6 +933,8 @@ def set_system_proxy(enable=True, host=PROXY_BIND_IP, port=PROXY_PORT):
         log(f"Erreur set_system_proxy: {e}")
 
 # === Helper relay (high-performance pass-through) ===
+
+
 def _set_socket_opts_for_perf(sock):
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -868,6 +949,7 @@ def _set_socket_opts_for_perf(sock):
             pass
     except Exception:
         pass
+
 
 def _relay_worker(src, dst, buffer_size=65536):
     """
@@ -899,13 +981,16 @@ def _relay_worker(src, dst, buffer_size=65536):
         except Exception:
             pass
 
+
 def full_duplex_relay(a_sock, b_sock):
     """
     Lance deux threads pour relayer a->b et b->a en blocking mode.
     Retourne quand les deux directions sont terminées.
     """
-    t1 = threading.Thread(target=_relay_worker, args=(a_sock, b_sock), daemon=True)
-    t2 = threading.Thread(target=_relay_worker, args=(b_sock, a_sock), daemon=True)
+    t1 = threading.Thread(target=_relay_worker,
+                          args=(a_sock, b_sock), daemon=True)
+    t2 = threading.Thread(target=_relay_worker,
+                          args=(b_sock, a_sock), daemon=True)
     t1.start()
     t2.start()
     # attendre la fin naturelle des threads (pas de timeout)
@@ -927,7 +1012,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
     timeout = 10
     rbufsize = 0
     protocol_version = "HTTP/1.1"
-    VOIP_ALLOWED_PORTS = {80, 443, 3478, 5060, 5061}  # ports VOIP/STUN/SIP autorisés
+    # ports VOIP/STUN/SIP autorisés
+    VOIP_ALLOWED_PORTS = {80, 443, 3478, 5060, 5061}
 
     def _extract_hostname_from_path(self, path):
         try:
@@ -950,7 +1036,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                 if current_resolver and current_resolver.is_whitelisted(hostname):
                     log(f"✅ [WHITELIST BYPASS CONNECT] {hostname}:{target_port}")
                     # create connection and relay as usual without further checks
-                    remote = socket.create_connection((target_host, target_port), timeout=10)
+                    remote = socket.create_connection(
+                        (target_host, target_port), timeout=10)
                     self.send_response(200, "Connection Established")
                     self.send_header('Connection', 'close')
                     self.end_headers()
@@ -969,7 +1056,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                     return
             except Exception as e:
                 # si check whitelist plante, on continue vers checks sécurisés plutôt que laisser tout passer
-                log(f"[WARN] whitelist check error in CONNECT for {hostname}: {e}")
+                log(
+                    f"[WARN] whitelist check error in CONNECT for {hostname}: {e}")
 
             # blocage basé sur blocklist
             if block_enabled and current_resolver and current_resolver._is_blocked(hostname):
@@ -981,7 +1069,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             if current_resolver and current_resolver.is_whitelisted(hostname):
                 log(f"✅ [WHITELIST BYPASS CONNECT] {hostname}:{target_port}")
                 try:
-                    remote = socket.create_connection((target_host, target_port), timeout=10)
+                    remote = socket.create_connection(
+                        (target_host, target_port), timeout=10)
                     self.send_response(200, "Connection Established")
                     self.send_header('Connection', 'close')
                     self.end_headers()
@@ -1003,14 +1092,15 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                 # sinon on applique les règles normales
                 if block_http_other_ports and target_port not in self.VOIP_ALLOWED_PORTS:
                     log(f"🚫 [Proxy BLOCK other port] {target_host}:{target_port}")
-                    self.send_error(403, "port non standard bloqué par sécurité")
+                    self.send_error(
+                        403, "port non standard bloqué par sécurité")
                     return
-
 
             # Autorisation normale — établir tunnel
             log(f"✅ [Proxy ALLOW HTTPS] {hostname}")
 
-            remote = socket.create_connection((target_host, target_port), timeout=10)
+            remote = socket.create_connection(
+                (target_host, target_port), timeout=10)
             self.send_response(200, "Connection Established")
             self.send_header('Connection', 'close')
             self.end_headers()
@@ -1051,7 +1141,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             if current_resolver and current_resolver.is_whitelisted(hostname):
                 is_whitelisted = True
         except Exception as e:
-            log(f"_handle_http_method whitelist check error for {hostname}: {e}")
+            log(
+                f"_handle_http_method whitelist check error for {hostname}: {e}")
 
         # Si whitelistée => bypass complet : on n'applique pas block_http_traffic, ports ni blocklist
         if is_whitelisted:
@@ -1108,7 +1199,8 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
             log(f"✅ [Proxy ALLOW HTTP] {target_host}:{target_port} -> {self.command} {path_only}")
 
             # Construire headers à forwarder
-            hop_by_hop = {"proxy-connection","connection","keep-alive","transfer-encoding","te","trailers","upgrade","proxy-authorization"}
+            hop_by_hop = {"proxy-connection", "connection", "keep-alive",
+                          "transfer-encoding", "te", "trailers", "upgrade", "proxy-authorization"}
             header_lines = []
             host_header_value = target_host
             if (scheme == "http" and target_port != 80) or (scheme == "https" and target_port != 443):
@@ -1125,14 +1217,17 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
 
-            header_lines = [line for line in header_lines if not line.lower().startswith('connection:')]
+            header_lines = [
+                line for line in header_lines if not line.lower().startswith('connection:')]
             header_lines.append("Connection: close")
 
             request_line = f"{self.command} {path_only} {self.request_version}\r\n"
             request_headers_raw = "\r\n".join(header_lines) + "\r\n\r\n"
-            request_bytes = request_line.encode('utf-8') + request_headers_raw.encode('utf-8')
+            request_bytes = request_line.encode(
+                'utf-8') + request_headers_raw.encode('utf-8')
 
-            remote = socket.create_connection((target_host, target_port), timeout=10)
+            remote = socket.create_connection(
+                (target_host, target_port), timeout=10)
 
             _set_socket_opts_for_perf(self.connection)
             _set_socket_opts_for_perf(remote)
@@ -1181,30 +1276,63 @@ class BlockProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): return  # silence
 
 
-# === Log viewer (safe snapshot) ===
-def show_log_window():
+# === Log viewer (Tk, runs in a separate process) ===
+def run_log_viewer():
     """
-    Écrit un snapshot du log dans un fichier et l'ouvre dans l'éditeur par défaut.
-    Évite Tkinter (non thread-safe) pour ne pas provoquer de crash.
+    Fenêtre Tk autonome qui recharge le fichier de log toutes les secondes.
+    S'exécute dans un processus séparé pour éviter les problèmes de thread Tk.
     """
     try:
         os.makedirs(USER_CFG_DIR, exist_ok=True)
-        log_path = os.path.join(USER_CFG_DIR, "calmweb_log.txt")
-        with _LOG_LOCK:
-            snapshot = '\n'.join(log_buffer)
-        with open(log_path, 'w', encoding='utf-8', errors='ignore') as f:
-            f.write(snapshot)
+    except Exception:
+        pass
 
-        if platform.system().lower() == 'windows':
-            subprocess.Popen(['notepad.exe', log_path])
+    win = tk.Tk()
+    win.title("Calm Web - Log (auto-refresh)")
+    win.geometry("780x440")
+    text_area = ScrolledText(win, wrap=tk.WORD)
+    text_area.pack(expand=True, fill='both')
+    text_area.config(state='disabled')
+
+    def refresh():
+        try:
+            with open(LOG_FILE_PATH, 'r', encoding='utf-8', errors='ignore') as lf:
+                content = lf.read()
+        except Exception as ex:
+            content = f"Impossible de lire le log ({LOG_FILE_PATH}): {ex}"
+        try:
+            text_area.config(state='normal')
+            text_area.delete(1.0, tk.END)
+            text_area.insert(tk.END, content)
+            text_area.see(tk.END)
+            text_area.config(state='disabled')
+        except Exception:
+            pass
+        win.after(1000, refresh)
+
+    refresh()
+    try:
+        win.mainloop()
+    except Exception:
+        pass
+
+
+def show_log_window():
+    """
+    Lance un sous-processus dédié avec l'option --log-viewer pour afficher le log live en Tk.
+    """
+    try:
+        if getattr(sys, 'frozen', False):
+            cmd = [sys.executable, "--log-viewer"]
         else:
-            if hasattr(os, "startfile"):
-                os.startfile(log_path)  # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(['xdg-open', log_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log(f"Log sauvegardé dans {log_path}")
+            cmd = [sys.executable, os.path.abspath(__file__), "--log-viewer"]
+        creationflags = 0
+        if platform.system().lower() == 'windows' and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creationflags = subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(cmd, creationflags=creationflags)
+        log("Ouverture de la fenêtre de log...")
     except Exception as e:
-        log(f"Impossible d'ouvrir le log : {e}")
+        log(f"Impossible d'ouvrir la fenêtre de log : {e}")
 
 
 def create_image():
@@ -1220,6 +1348,7 @@ def create_image():
     except Exception:
         return None
 
+
 def open_config_in_editor(path):
     """
     Ouvre le fichier de config dans le Bloc-notes (non bloquant).
@@ -1227,8 +1356,10 @@ def open_config_in_editor(path):
     try:
         if not os.path.exists(path):
             log(f"custom.cfg absent, création avant ouverture : {path}")
-            write_default_custom_cfg(path, manual_blocked_domains, whitelisted_domains)
+            write_default_custom_cfg(
+                path, manual_blocked_domains, whitelisted_domains)
         # lancer Notepad sur thread séparé pour ne pas bloquer UI
+
         def _open():
             try:
                 if platform.system().lower() == 'windows':
@@ -1238,13 +1369,15 @@ def open_config_in_editor(path):
                     if hasattr(os, "startfile"):
                         os.startfile(path)
                     else:
-                        subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        subprocess.Popen(
+                            ['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 log(f"Erreur ouverture éditeur pour {path} : {e}")
         threading.Thread(target=_open, daemon=True).start()
         log(f"Ouverture du fichier de configuration : {path}")
     except Exception as e:
         log(f"Erreur ouverture éditeur pour {path} : {e}")
+
 
 def reload_config_action(icon=None, item=None):
     """
@@ -1263,8 +1396,10 @@ def reload_config_action(icon=None, item=None):
         global current_resolver
         if current_resolver:
             # Lancer les deux rechargements (blocklist + whitelist) en parallèle
-            threading.Thread(target=current_resolver._load_blocklist, daemon=True).start()
-            threading.Thread(target=current_resolver._load_whitelist, daemon=True).start()
+            threading.Thread(
+                target=current_resolver._load_blocklist, daemon=True).start()
+            threading.Thread(
+                target=current_resolver._load_whitelist, daemon=True).start()
             log("Demande de rechargement complet des blocklists et whitelists externes (thread).")
         else:
             log("[WARN] Aucun resolver actif pour rechargement.")
@@ -1284,20 +1419,26 @@ def toggle_block(icon, item):
         log(f"Erreur lors du réglage proxy système au toggle: {e}")
     update_menu(icon)
 
+
 def update_menu(icon):
     """
     Reconstruit le menu systray. Safe: encapsule entièrement les callbacks pour éviter exceptions non gérées.
     """
     try:
         icon.menu = Menu(
-            MenuItem(f"Calm Web v{calmweb_version}", lambda: None, enabled=False),
-            MenuItem(f"🔒 Blocage: {'✅ Activé' if block_enabled else '❌ Désactivé'}", lambda: None, enabled=False),
-            MenuItem("❌ Désactiver le Blocage" if block_enabled else "✅ Activer le Blocage", toggle_block),
+            MenuItem(f"Calm Web v{calmweb_version}",
+                     lambda: None, enabled=False),
+            MenuItem(
+                f"🔒 Blocage: {'✅ Activé' if block_enabled else '❌ Désactivé'}", lambda: None, enabled=False),
+            MenuItem(
+                "❌ Désactiver le Blocage" if block_enabled else "✅ Activer le Blocage", toggle_block),
             MenuItem("⚙️ Config", Menu(
-                MenuItem("✏️ Ouvrir / Éditer la config", lambda icon, item: threading.Thread(target=open_config_in_editor, args=(get_custom_cfg_path(INSTALL_DIR),), daemon=True).start()),
+                MenuItem("✏️ Ouvrir / Éditer la config", lambda icon, item: threading.Thread(
+                    target=open_config_in_editor, args=(get_custom_cfg_path(INSTALL_DIR),), daemon=True).start()),
                 MenuItem("🔄 Recharger la config", reload_config_action)
             )),
-            MenuItem("📄 Afficher le Log", lambda: threading.Thread(target=show_log_window, daemon=True).start()),
+            MenuItem("📄 Afficher le Log", lambda: threading.Thread(
+                target=show_log_window, daemon=True).start()),
             MenuItem("🚪 Quitter", quit_app)
         )
         try:
@@ -1307,6 +1448,7 @@ def update_menu(icon):
             pass
     except Exception as e:
         log(f"update_menu error: {e}")
+
 
 def quit_app(icon=None, item=None):
     """
@@ -1352,6 +1494,8 @@ def quit_app(icon=None, item=None):
         log(f"Erreur lors de l'arrêt de l'application : {e}")
 
 # === PROXY SERVER MANAGEMENT ===
+
+
 class LimitedThreadingHTTPServer(ThreadingHTTPServer):
     """
     ThreadingHTTPServer avec limite de connexions actives via sémaphore.
@@ -1399,6 +1543,8 @@ def start_proxy_server(bind_ip=PROXY_BIND_IP, port=PROXY_PORT):
         return None
 
 # === INSTALL / UNINSTALL / MAIN ===
+
+
 def install():
     """
     Installation : copie, firewall rule, tâche planifiée, config, et lancement.
@@ -1419,11 +1565,13 @@ def install():
         log(f"Impossible de créer INSTALL_DIR {INSTALL_DIR}: {e}")
 
     # Créer custom.cfg dans APPDATA si absent (avec domaines embarqués comme base)
-    cfg_path = ensure_custom_cfg_exists(INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
+    cfg_path = ensure_custom_cfg_exists(
+        INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
 
     # Copier le script/exe
     try:
-        current_file = sys.argv[0] if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+        current_file = sys.argv[0] if getattr(
+            sys, 'frozen', False) else os.path.abspath(__file__)
         target_file = os.path.join(INSTALL_DIR, EXE_NAME)
         try:
             shutil.copy(current_file, target_file)
@@ -1488,14 +1636,16 @@ def install():
                 tmp_file_path = tmp_file.name
             if os.path.exists(tmp_file_path):
                 try:
-                    subprocess.run(["schtasks", "/Create", "/tn", "CalmWeb", "/XML", tmp_file_path, "/F"], check=True)
+                    subprocess.run(
+                        ["schtasks", "/Create", "/tn", "CalmWeb", "/XML", tmp_file_path, "/F"], check=True)
                     log(f"Tâche planifiée ajoutée avec succès.")
                 except subprocess.CalledProcessError as e:
                     log(f"Erreur lors de l'ajout de la tâche planifiée : {e}")
                 except Exception as e:
                     log(f"Erreur inattendue schtasks: {e}")
             else:
-                log(f"Erreur : le fichier XML temporaire n'a pas pu être créé à {tmp_file_path}")
+                log(
+                    f"Erreur : le fichier XML temporaire n'a pas pu être créé à {tmp_file_path}")
         except Exception as e:
             log(f"Erreur add_task_from_xml: {e}")
         finally:
@@ -1515,7 +1665,8 @@ def install():
                 os.startfile(target_file)
                 log("Installation terminée - Calm Web démarré")
             except Exception as e:
-                log(f"Impossible de démarrer automatiquement {target_file} : {e}")
+                log(
+                    f"Impossible de démarrer automatiquement {target_file} : {e}")
         else:
             log("Installation: auto-start non supporté sur cette plateforme.")
     except Exception as e:
@@ -1529,13 +1680,16 @@ def install():
         pass
 
 # === Run Calm Web ===
+
+
 def run_calmweb():
     """
     Point d'entrée principal pour exécuter Calm Web en mode utilisateur.
     """
     global current_resolver, proxy_server
     try:
-        cfg_path = ensure_custom_cfg_exists(INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
+        cfg_path = ensure_custom_cfg_exists(
+            INSTALL_DIR, manual_blocked_domains, whitelisted_domains)
         load_custom_cfg_to_globals(cfg_path)
     except Exception as e:
         log(f"Erreur chargement config initiale: {e}")
@@ -1568,6 +1722,7 @@ def run_calmweb():
         update_menu(icon)
         log(f"Calm Web démarré. Proxy sur {PROXY_BIND_IP}:{PROXY_PORT}, blocage {'activé' if block_enabled else 'désactivé'}.")
         # hook signals to allow graceful termination
+
         def _signal_handler(signum, frame):
             log(f"Signal {signum} reçu, arrêt.")
             quit_app(icon)
@@ -1586,10 +1741,14 @@ def run_calmweb():
         except KeyboardInterrupt:
             quit_app(None)
 
-def robust_main():
+
+def main():
     """
     Mécanisme auto-restart pour fiabilité maximale
     """
+    if "--log-viewer" in sys.argv:
+        run_log_viewer()
+        return
     restart_count = 0
     max_restarts = 5
 
@@ -1631,5 +1790,6 @@ def robust_main():
     except Exception:
         os._exit(1)
 
+
 if __name__ == "__main__":
-    robust_main()
+    main()
