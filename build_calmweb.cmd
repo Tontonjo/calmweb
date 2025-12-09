@@ -45,15 +45,32 @@ if /i "%NO_ICON%"=="1" (
 )
 set "ENTRY=%REPO_ROOT%\\program\\calmweb_installer.py"
 set "DIST_DIR=%REPO_ROOT%\\dist"
+set "DIST_EXE=%DIST_DIR%\\calmweb_installer.exe"
+set "BUILD_SWITCH=--onefile"
+set "RUNTIME_SWITCH="
 
 if not exist "%DIST_DIR%" mkdir "%DIST_DIR%"
+
+:: Allow forcing onedir build to avoid PyInstaller temp unpack/cleanup warnings: set ONEDIR=1 before running
+if /i "%ONEDIR%"=="1" (
+  set "BUILD_SWITCH=--onedir"
+  set "RUNTIME_SWITCH="
+)
+
+:: Best effort: remove previous exe so PyInstaller can overwrite (avoids WinError 5 if locked)
+if exist "%DIST_EXE%" (
+  del /f /q "%DIST_EXE%" >nul 2>&1
+)
 
 "%PYINSTALLER%" ^
   --clean ^
   --hidden-import urllib3 ^
-  --onefile ^
+  --hidden-import tkinter ^
+  --hidden-import tkinter.scrolledtext ^
+  %BUILD_SWITCH% ^
   --noconsole ^
   --uac-admin ^
+  %RUNTIME_SWITCH% ^
   %ICON_SWITCH% ^
   --distpath "%DIST_DIR%" ^
   "%ENTRY%"
