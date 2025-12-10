@@ -7,10 +7,13 @@ msftidentity.com
 msftauth.net
 digicert.com
 ctldl.windowsupdate.com
+
 # This domain appear usefull for sharing but appear in the URLHaus list.
 drive.google.com
+
 # Speedtest.net use custom port and is a commonly used tool
 ooklaserver.net
+
 # Web Content Delivery
 ## Ensure some websites display correctly
 cdn.jsdelivr.net
