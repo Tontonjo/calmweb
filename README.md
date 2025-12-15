@@ -72,7 +72,6 @@ Everything is subject to discussion and enhancements! Share your knowledge.
 
 - Test on Windows 10
 - Ensure the proxy will not cause problems: correct stop at shutdown, multiple users
-- Displaying the log crashes the program
 - Enhance the program, make it perfectly stable and robust.
 - Correct encoding (some messages are displayed weirdly)
 - Configure a self-updating method
