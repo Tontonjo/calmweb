@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.spec
+
+# Tools and IDE settings
+.vscode/
+.idea/
+*.iml
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,4 +1,4 @@
-# Thoses domains are allowed to ensure good fonctionnality of the client
+# Those domains are allowed to ensure good functionality of the client
 data.microsoft.com
 download.windowsupdate.com
 mp.microsoft.com
@@ -8,10 +8,10 @@ msftauth.net
 digicert.com
 ctldl.windowsupdate.com
 
-# This domain appear usefull for sharing but appear in the URLHaus list.
+# This domain appears useful for sharing but is in the URLHaus list.
 drive.google.com
 
-# Speedtest.net use custom port and is a commonly used tool
+# Speedtest.net uses a custom port and is a commonly used tool
 ooklaserver.net
 
 # Web Content Delivery
