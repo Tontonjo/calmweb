@@ -33,7 +33,7 @@ import sys
 import shutil
 import os
 import webbrowser
-calmweb_version = "1.1.1"
+calmweb_version = "1.2.0"
 
 
 # Optional Windows-only imports: encapsulées pour éviter crash si non disponibles
