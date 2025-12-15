@@ -52,6 +52,19 @@ The program will:
 ### Known problems:
 
 - Sandbox not working when calmweb is running
+- Direct access to IPv6 addresses  like https://[::1]:8080
+
+# Build:
+Place yourself in the calmweb-main directory and run:
+```
+& "$env:USERPROFILE\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\Scripts\pyinstaller.exe" `
+--onefile `
+--noconsole `
+--uac-admin `
+--icon ".\ressources\calmweb.png" `
+--distpath ".\" `
+".\program\calmweb_installer.py"
+```
 
 ### todo:
 
