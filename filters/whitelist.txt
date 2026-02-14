@@ -1,12 +1,17 @@
 # Those domains are allowed to ensure good functionality of the client
+
+# Microsoft updates and usefull services
 data.microsoft.com
 download.windowsupdate.com
 mp.microsoft.com
 msecnd.net
 msftidentity.com
 msftauth.net
-digicert.com
 ctldl.windowsupdate.com
+
+# Certifiactes
+digicert.com
+pki.goog
 
 # This domain appears useful for sharing but is in the URLHaus list.
 drive.google.com
