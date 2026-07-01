@@ -9,6 +9,9 @@ msftidentity.com
 msftauth.net
 ctldl.windowsupdate.com
 
+# Google
+google.com
+
 # Certifiactes
 digicert.com
 pki.goog
