@@ -11,6 +11,8 @@ ctldl.windowsupdate.com
 
 # Google
 google.com
+## Youtub thumbnails
+ytimg.com
 
 # Certifiactes
 digicert.com
