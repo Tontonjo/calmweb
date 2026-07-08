@@ -1,6 +1,13 @@
 # Those domains are allowed to ensure good functionality of the client
 
-# Microsoft updates and usefull services
+# Google
+## Got listed in a blacklist on the 29.06.2026
+google.com
+## Youtub thumbnails
+ytimg.com
+
+# Microsoft
+## Updates and known usefull services
 data.microsoft.com
 download.windowsupdate.com
 mp.microsoft.com
@@ -8,24 +15,33 @@ msecnd.net
 msftidentity.com
 msftauth.net
 ctldl.windowsupdate.com
+ipv6.msftncsi.com
 
-# Google
-google.com
-## Youtub thumbnails
-ytimg.com
+# Apple
+appldnld.apple.com
+crl.apple.com
 
 # Certifiactes
 digicert.com
 pki.goog
+lencr.org
+ssl.com
 
-# This domain appears useful for sharing but is in the URLHaus list.
+# User Experience
+## This domain appears useful for sharing but is in the URLHaus list.
 drive.google.com
+share.google
 
-# Speedtest.net uses a custom port and is a commonly used tool
+## Speedtest.net uses a custom port and is a commonly used tool
 ooklaserver.net
 
-# Web Content Delivery
+## Google Storage
+storage.googleapis.com
+
 ## Ensure some websites display correctly
 cdn.jsdelivr.net
-# Google Storage
-storage.googleapis.com
+
+# Calm Web
+## Domains needed to access Calm Web ressources :)
+github.com
+raw.githubusercontent.com
