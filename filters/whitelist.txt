@@ -3,7 +3,7 @@
 # Google
 ## Got listed in a blacklist on the 29.06.2026
 google.com
-## Youtub thumbnails
+## Youtube thumbnails
 ytimg.com
 
 # Microsoft
@@ -21,11 +21,15 @@ ipv6.msftncsi.com
 appldnld.apple.com
 crl.apple.com
 
-# Certifiactes
+# Certificates
 digicert.com
 pki.goog
 lencr.org
 ssl.com
+sectigo.com
+comodoca.com
+globalsign.com
+letsencrypt.org
 
 # User Experience
 ## This domain appears useful for sharing but is in the URLHaus list.
@@ -40,6 +44,10 @@ storage.googleapis.com
 
 ## Ensure some websites display correctly
 cdn.jsdelivr.net
+
+# Discord
+## This domain is needed to allow audio traffic
+discord.media
 
 # Calm Web
 ## Domains needed to access Calm Web ressources :)

@@ -1,0 +1,18 @@
+Calm Web a été installé avec succès.
+
+Les composants suivants ont été configurés :
+- Fichier exécutable CalmWeb installé dans le répertoire de votre choix
+- Règle de pare-feu Windows ajoutée (autorise le trafic proxy de CalmWeb)
+- Tâche planifiée créée (CalmWeb démarre automatiquement à l'ouverture de session)
+
+Configuration :
+
+- Les paramètres utilisateur sont enregistrés dans : %APPDATA%\CalmWeb\custom.cfg
+- Vous pouvez y modifier les domaines bloqués/autorisés
+- Cliquez avec le bouton droit sur l'icône CalmWeb dans la barre d'état système pour accéder rapidement aux paramètres
+
+Pour désinstaller CalmWeb, utilisez « Ajout/Suppression de programmes » dans les paramètres Windows.
+
+Le programme de désinstallation supprimera automatiquement la règle de pare-feu, la tâche planifiée et les paramètres de proxy.
+
+Pour obtenir de l'aide, consultez : https://github.com/Tontonjo/calmweb

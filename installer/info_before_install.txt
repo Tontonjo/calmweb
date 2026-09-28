@@ -1,0 +1,26 @@
+Calm Web - Protection Web Système
+Licence : Licence publique générale GNU v3 (GPLv3)
+
+CalmWeb est un filtre proxy web conçu pour protéger les utilisateurs contre les publicités, les arnaques et les logiciels de contrôle à distance. Il fonctionne à l'échelle du système avec n'importe quel navigateur.
+
+⚠️ Calm Web n'est pas un anti-virus et ne garantit en aucun cas une protection totale contre le piratage ou les arnaques, et ne prétend pas le faire. Chaque utilisateur reste responsable de sa navigation et doit être conscient des risques encourus. Toutefois, CalmWeb permet de réduire certains risques en ajoutant un garde-fou : il bloque des techniques connues en se basant sur des ressources communautaires.
+
+Fonctionnalités :
+- Bloque les sites web frauduleux et malveillants connus
+- Bloque les logiciels de bureau à distance/d'assistance (TeamViewer, AnyDesk, etc.)
+- Bloque les publicités et les domaines de suivi
+- Bloque l'accès direct à l'adresse IP (empêche les techniques d'escroquerie courantes)
+- Bloque le trafic HTTP non sécurisé par défaut
+- Mise à jour automatique des listes de blocage à partir de sources communautaires fiables
+
+Fonctionnement:
+CalmWeb fonctionne comme un proxy local sur le port 8080 et configure le proxy système Windows pour acheminer tout le trafic web via ce dernier.
+
+Configuration requise :
+- Windows 10 ou Windows 11
+- Privilèges d'administrateur
+- Connexion Internet pour le téléchargement des listes de blocage
+
+Dépôt : https://github.com/Tontonjo/calmweb
+Une traduction non-officielle en français des conditions d'utilisation est disponible ici:
+https://tode.tuxfamily.org/?page_id=48
