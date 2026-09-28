@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "CalmWeb"
+version = "1.7.7"
+description = "A system-wide web proxy filter to protect users from ads, scams, and remote control software"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+dependencies = [
+    "urllib3",
+    "requests",
+    "certifi",
+    "truststore",
+    "pillow",
+    "pystray",
+    "customtkinter>=5.2",
+    "darkdetect",
+    "packaging",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    # 6.22 is the first release that can freeze Tcl/Tk 9, which Python 3.14
+    # ships with its library embedded in a zipfs archive rather than on disk.
+    "pyinstaller>=6.22",
+]
+
+[project.scripts]
+calmweb = "calmweb.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/calmweb"]
