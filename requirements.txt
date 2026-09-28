@@ -1,4 +1,0 @@
-urllib3
-pillow
-pystray
-pywin32
