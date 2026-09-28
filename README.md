@@ -26,6 +26,9 @@
   <a href="https://github.com/Tontonjo/calmweb/releases/latest"><b>⬇️  Télécharger la dernière version pour Windows</b></a>
 </p>
 
+<img width="940" height="659" alt="image" src="https://github.com/user-attachments/assets/c3c847e2-f61a-4371-9cab-1a0eaedabfc4" />
+
+
 <hr>
 
 <details open>
