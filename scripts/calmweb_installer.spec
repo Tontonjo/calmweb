@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../resources/calmweb_icon.png', '.'), ('C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../resources/calmweb_active.png', '.'), ('C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../resources/calmweb.ico', '.'), ('C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../resources/calmweb_active.ico', '.'), ('C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../VERSION', '.')]
+datas = [('C:/Users/Jo/Downloads/calmweb_jo/scripts/../resources/calmweb_icon.png', '.'), ('C:/Users/Jo/Downloads/calmweb_jo/scripts/../resources/calmweb_active.png', '.'), ('C:/Users/Jo/Downloads/calmweb_jo/scripts/../resources/calmweb.ico', '.'), ('C:/Users/Jo/Downloads/calmweb_jo/scripts/../resources/calmweb_active.ico', '.'), ('C:/Users/Jo/Downloads/calmweb_jo/scripts/../VERSION', '.')]
 binaries = []
 hiddenimports = ['urllib3', 'truststore', 'certifi', 'calmweb.net', 'tkinter', 'tkinter.scrolledtext', 'tkinter.ttk', 'tkinter.filedialog', 'tkinter.messagebox', 'darkdetect', 'calmweb.gui', 'calmweb.i18n', 'calmweb.stats']
 tmp_ret = collect_all('customtkinter')
@@ -9,8 +9,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../scripts/pyinstaller_entry.py'],
-    pathex=['C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../src'],
+    ['C:/Users/Jo/Downloads/calmweb_jo/scripts/../scripts/pyinstaller_entry.py'],
+    pathex=['C:/Users/Jo/Downloads/calmweb_jo/scripts/../src'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -42,5 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:/Users/Jo/Downloads/calmweb-main/calmweb-main/scripts/../resources/calmweb.ico'],
+    icon=['C:/Users/Jo/Downloads/calmweb_jo/scripts/../resources/calmweb.ico'],
 )

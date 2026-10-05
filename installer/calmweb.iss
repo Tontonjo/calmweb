@@ -1,3 +1,4 @@
+; Script revision: 1.8.4
 #define MyAppName "CalmWeb"
 ; Version is injected by build.cmd via /DMyAppVersion=X.Y.Z
 ; Fallback for manual compilation:
@@ -52,7 +53,16 @@ Source: "..\resources\calmweb.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\resources\calmweb_active.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\resources\calmweb_icon.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\resources\calmweb_active.png"; DestDir: "{app}"; DestName: "calmweb_active.png"; Flags: ignoreversion
-Source: "scheduled_task.xml"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: PatchScheduledTaskXml
+
+[InstallDelete]
+; Left behind by 1.7.x, which started CalmWeb from a scheduled task
+Type: files; Name: "{app}\scheduled_task.xml"
+
+[Registry]
+; Start CalmWeb at logon for every user (replaces the 1.7.x scheduled task).
+; HKLM64 so the value lands in the 64-bit view, which Windows reads first.
+Root: HKLM64; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CalmWeb"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Check: IsWin64
+Root: HKLM32; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CalmWeb"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Check: not IsWin64
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -65,8 +75,11 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Run]
 ; Add firewall rule
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=CalmWeb dir=in action=allow program=""{app}\{#MyAppExeName}"" profile=any"; Flags: runhidden
-; Create scheduled task
-Filename: "schtasks"; Parameters: "/Create /tn CalmWeb /XML ""{app}\scheduled_task.xml"" /F"; Flags: runhidden
+; Remove the 1.7.x logon scheduled task (no-op when absent)
+Filename: "schtasks"; Parameters: "/Delete /tn CalmWeb /F"; Flags: runhidden
+; Remove the legacy QUIC firewall rule of older versions (no-op when absent),
+; so the application never has to elevate to do it
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""CalmWeb - Force HTTP3 fallback"""; Flags: runhidden
 ; Launch after install (optional)
 ; Started through cmd so the PyInstaller bootloader variables are cleared
 ; first. During an in-app update, Setup inherits _PYI_* from the running copy
@@ -85,7 +98,7 @@ Filename: "{cmd}"; Parameters: "/C set ""_PYI_ARCHIVE_FILE="" & set ""_PYI_APPLI
 Filename: "taskkill"; Parameters: "/IM calmweb.exe /F"; Flags: runhidden; RunOnceId: "KillCalmWeb"
 ; Remove firewall rule
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=CalmWeb"; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
-; Delete scheduled task
+; Delete the legacy scheduled task, in case a 1.7.x install was never upgraded cleanly
 Filename: "schtasks"; Parameters: "/Delete /tn CalmWeb /F"; Flags: runhidden; RunOnceId: "DeleteScheduledTask"
 ; Reset system proxy
 Filename: "netsh"; Parameters: "winhttp reset proxy"; Flags: runhidden; RunOnceId: "ResetWinHttpProxy"
@@ -94,19 +107,41 @@ Filename: "netsh"; Parameters: "winhttp reset proxy"; Flags: runhidden; RunOnceI
 Type: files; Name: "{userappdata}\CalmWeb\calmweb.lock"
 
 [Code]
-procedure PatchScheduledTaskXml();
+{ AppContainer loopback exemptions.
+  Packaged applications (new Outlook, new Teams) and the Windows sign-in
+  broker are forbidden from reaching 127.0.0.1 unless exempted, so they lose
+  the network while the proxy is on. Setting the exemption needs
+  administrator rights: Setup already has them, so it is done here once and
+  the application never has to show a UAC prompt.
+  Keep this list in sync with LOOPBACK_EXEMPT_PACKAGES in
+  src/calmweb/platform/windows.py. }
+procedure LoopbackExempt(const Action, PackageName: String);
 var
-  FilePath: String;
-  FileContent: AnsiString;
-  NewContent: String;
+  ResultCode: Integer;
+  OldRedirection: Boolean;
 begin
-  FilePath := ExpandConstant('{app}\scheduled_task.xml');
-  if LoadStringFromFile(FilePath, FileContent) then
-  begin
-    NewContent := String(FileContent);
-    StringChangeEx(NewContent, '__INSTALL_DIR__', ExpandConstant('{app}'), True);
-    SaveStringToFile(FilePath, AnsiString(NewContent), False);
+  OldRedirection := True;
+  { CheckNetIsolation lives in the 64-bit System32 on 64-bit Windows. }
+  if IsWin64 then
+    OldRedirection := EnableFsRedirection(False);
+  try
+    Exec(ExpandConstant('{sys}\CheckNetIsolation.exe'),
+         'LoopbackExempt ' + Action + ' -n=' + PackageName,
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  finally
+    if IsWin64 then
+      EnableFsRedirection(OldRedirection);
   end;
+end;
+
+procedure ApplyLoopbackExemptions(const Action: String);
+begin
+  LoopbackExempt(Action, 'Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy');
+  LoopbackExempt(Action, 'Microsoft.AccountsControl_cw5n1h2txyewy');
+  LoopbackExempt(Action, 'Microsoft.Windows.CloudExperienceHost_cw5n1h2txyewy');
+  LoopbackExempt(Action, 'windows_ie_ac_001');
+  LoopbackExempt(Action, 'Microsoft.OutlookForWindows_8wekyb3d8bbwe');
+  LoopbackExempt(Action, 'MSTeams_8wekyb3d8bbwe');
 end;
 
 procedure InitializeWizard();
@@ -132,12 +167,21 @@ begin
     { A force-killed instance leaves its lock file behind, naming a PID that
       Windows may since have handed to another process. }
     DeleteFile(ExpandConstant('{userappdata}\CalmWeb\calmweb.lock'));
+  end
+  else if CurStep = ssPostInstall then
+  begin
+    ApplyLoopbackExemptions('-a');
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
+  if CurUninstallStep = usUninstall then
+  begin
+    { Undo the exemptions Setup added. }
+    ApplyLoopbackExemptions('-d');
+  end
+  else if CurUninstallStep = usPostUninstall then
   begin
     { Reset proxy registry settings }
     RegWriteDWordValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Internet Settings', 'ProxyEnable', 0);
