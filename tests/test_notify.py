@@ -1,5 +1,7 @@
 """Tests for calmweb.notify -- pacing of block notifications.
 
+Version: 1.8.4
+
 The point of these is the throttling. A blocked page produces dozens of
 blocked sub-resources in a second; the module is only useful if that turns
 into one readable message.
@@ -7,8 +9,6 @@ into one readable message.
 
 from __future__ import annotations
 
-import sys
-import types
 
 import pytest
 
@@ -135,44 +135,3 @@ class TestDeliveryPacing:
         notify.notify_blocked("a.example", "blocklist")
         notify.notify_blocked("b.example", "manual")
         assert set(notify._pending) == {"a.example", "b.example"}
-
-
-class TestLoopbackNotification:
-    """The one failure with no other symptom deserves to be said out loud."""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_loopback(self, monkeypatch):
-        monkeypatch.setattr(notify, "_loopback_announced", False)
-        self.sent: list[tuple[str, str]] = []
-        fake_tray = types.ModuleType("calmweb.tray")
-        fake_tray.show_notification = lambda title, body: self.sent.append((title, body))
-        monkeypatch.setitem(sys.modules, "calmweb.tray", fake_tray)
-        yield
-
-    def test_it_announces_once(self):
-        notify.notify_loopback_blocked(["Microsoft.OutlookForWindows_8wekyb3d8bbwe"])
-
-        assert len(self.sent) == 1
-        title, body = self.sent[0]
-        assert title
-        assert "administrateur" in body or "administrator" in body
-
-    def test_it_does_not_repeat_on_every_toggle(self):
-        notify.notify_loopback_blocked(["a"])
-        notify.notify_loopback_blocked(["a"])
-        notify.notify_loopback_blocked(["b"])
-
-        assert len(self.sent) == 1
-
-    def test_nothing_missing_means_nothing_said(self):
-        notify.notify_loopback_blocked([])
-
-        assert self.sent == []
-
-    def test_it_ignores_the_block_notification_option(self, monkeypatch):
-        """notify_on_block governs filtering decisions, not a total blackout."""
-        monkeypatch.setattr(config, "notify_on_block", False)
-
-        notify.notify_loopback_blocked(["a"])
-
-        assert len(self.sent) == 1

@@ -3,6 +3,8 @@
 The tray stays intentionally small: it shows the current state at a glance,
 offers the handful of switches an advanced user may need, and opens the
 dashboard (:mod:`calmweb.gui`) for everything else.
+
+Version: 1.8.4
 """
 
 from __future__ import annotations
@@ -565,7 +567,7 @@ def release_system_state() -> None:
     """Put the machine back the way CalmWeb found it, without quitting.
 
     Everything here touches the *system*, not this process: the WinINET proxy
-    settings, the loopback exemptions, the legacy QUIC firewall rule, the
+    settings, the legacy QUIC firewall rule, the
     listening port and the single-instance lock.
 
     It is deliberately separate from :func:`quit_app` because the update

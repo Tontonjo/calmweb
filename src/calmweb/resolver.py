@@ -1,24 +1,34 @@
 """Blocklist downloading, parsing, and domain resolution.
 
+Version: 1.8.4
+
 Handles hosts-file format, plain domain lists, CSV, ZIP archive
 blocklists and whitelists (exact, wildcard, CIDR).  Provides
 background reload on a configurable timer.
+
+Memory: downloaded lists are read line by line and every domain is reduced
+to a 64-bit hash as soon as it is parsed (see :mod:`calmweb.domainset`), so
+neither the decoded text nor one string per domain is ever held in full.
 """
 
 from __future__ import annotations
 
 import csv
+import gc
 import io
 import ipaddress
 import threading
 import time
 import traceback
 import zipfile
+from collections.abc import Iterable
+from typing import IO
 from urllib.parse import urlparse
 
 import urllib3
 
 from . import config
+from .domainset import DomainHashBuilder, DomainHashSet
 from .log import log
 from .net import make_pool_manager
 from .normalize import normalize_host, normalize_whitelist_entry, parse_list_line
@@ -113,86 +123,76 @@ def _parse_hosts_line(line: str) -> str | None:
 # Blocklist content parsers
 # ------------------------------------------------------------------
 
-def _parse_text_blocklist(content: str, domains: set[str], cap_reached: bool) -> bool:
-    """Parse plain text blocklist content (hosts-file format, plain domain list).
+class _BlocklistSink:
+    """Receives parsed entries: IP addresses in a small set, names hashed.
 
-    Returns updated *cap_reached* flag.
+    ``add`` returns False once :data:`config.MAX_BLOCKED_DOMAINS` distinct
+    names (or as many IP addresses) are reached, which stops the parsing.
     """
-    for line in content.splitlines():
-        if cap_reached:
-            break
+
+    __slots__ = ("names", "ips", "_cap")
+
+    def __init__(self, cap: int) -> None:
+        self._cap: int = max(1, int(cap))
+        self.ips: set[str] = set()
+        self.names: DomainHashBuilder = DomainHashBuilder(self._cap)
+
+    def add(self, entry: str) -> bool:
+        if _looks_like_ip(entry):
+            self.ips.add(entry)
+            return len(self.ips) < self._cap
+        return self.names.add(entry)
+
+
+def _parse_lines(lines: Iterable[str], sink: _BlocklistSink) -> bool:
+    """Feed every entry of *lines* to *sink*. Returns True when the cap was hit.
+
+    *lines* is consumed lazily (a text stream over the downloaded bytes), so
+    the decoded list never exists in memory as a whole.
+    """
+    for line in lines:
+        line = line.rstrip("\r\n")
+        if not line or line.startswith("#"):
+            continue
         # CSV rows (URLHaus) carry the URL in the third column.
         if line.startswith('"') and "," in line:
             host = _parse_csv_line(line)
-            entries = [host] if host else []
+            entries: Iterable[str] = (host,) if host else ()
         else:
             entries = parse_list_line(line)
-        for domain in entries:
-            domains.add(domain)
-            if len(domains) >= config.MAX_BLOCKED_DOMAINS:
-                cap_reached = True
+        for entry in entries:
+            if not sink.add(entry):
                 log(
-                    f"\u26a0\ufe0f Limite de domaines atteinte ({config.MAX_BLOCKED_DOMAINS}), truncating."
+                    f"\u26a0\ufe0f Limite de domaines atteinte "
+                    f"({config.MAX_BLOCKED_DOMAINS}), truncating."
                 )
-                break
-    return cap_reached
+                return True
+    return False
 
 
-def _parse_zip_blocklist(
-    raw_data: bytes,
-    url: str,
-    domains: set[str],
-    cap_reached: bool,
-) -> bool:
-    """Extract and parse ZIP archive contents.  Returns updated *cap_reached*."""
-    log(f"\u2B1C ZIP archive détectée: {url}")
-    with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
-        for name in zf.namelist():
-            if cap_reached:
-                break
-            if not name.lower().endswith((".txt", ".csv", ".log")):
-                continue
-            log(f"   -> Lecture {name} depuis archive ZIP")
-            content = zf.read(name).decode("utf-8", errors="ignore")
-
-            for line in content.splitlines():
-                if cap_reached:
-                    break
-                if not line or line.startswith("#"):
-                    continue
-                # CSV format (e.g. URLHaus)
-                if line.startswith('"') and "," in line:
-                    host = _parse_csv_line(line)
-                    if host:
-                        domains.add(host)
-                else:
-                    # Plain text / hosts-file / Adblock format
-                    domains.update(parse_list_line(line))
-
-                if len(domains) >= config.MAX_BLOCKED_DOMAINS:
-                    cap_reached = True
-                    log(
-                        f"\u26a0\ufe0f Limite de domaine atteinte "
-                        f"({config.MAX_BLOCKED_DOMAINS}), truncating."
-                    )
-    return cap_reached
+def _text_lines(stream: IO[bytes]) -> io.TextIOWrapper:
+    """Decode *stream* lazily, line by line, ignoring invalid UTF-8."""
+    return io.TextIOWrapper(stream, encoding="utf-8", errors="ignore", newline="")
 
 
-def _parse_blocklist_content(
-    raw_data: bytes,
-    url: str,
-    domains: set[str],
-    cap_reached: bool,
-) -> bool:
-    """Parse raw content and add domains to the set.
+def _parse_blocklist_content(raw_data: bytes, url: str, sink: _BlocklistSink) -> bool:
+    """Parse one downloaded list (plain text or ZIP) into *sink*.
 
-    Handles both ZIP and plain text formats.
-    Returns updated *cap_reached* flag.
+    Returns True when the entry cap was reached.
     """
     if zipfile.is_zipfile(io.BytesIO(raw_data)):
-        return _parse_zip_blocklist(raw_data, url, domains, cap_reached)
-    content = raw_data.decode("utf-8", errors="ignore")
-    return _parse_text_blocklist(content, domains, cap_reached)
+        log(f"\u2B1C ZIP archive détectée: {url}")
+        with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
+            for name in zf.namelist():
+                if not name.lower().endswith((".txt", ".csv", ".log")):
+                    continue
+                log(f"   -> Lecture {name} depuis archive ZIP")
+                with zf.open(name) as member, _text_lines(member) as lines:
+                    if _parse_lines(lines, sink):
+                        return True
+        return False
+    with _text_lines(io.BytesIO(raw_data)) as lines:
+        return _parse_lines(lines, sink)
 
 
 # ------------------------------------------------------------------
@@ -216,6 +216,22 @@ def _parse_whitelist_entry(
 # ------------------------------------------------------------------
 # Startup safety pause
 # ------------------------------------------------------------------
+
+def _release_memory() -> None:
+    """Give back to Windows the memory freed by a (re)load. Never raises.
+
+    The previous index and all the temporary objects of the parsing are
+    collected, then the working set is trimmed so the figure shown in the
+    Task Manager reflects what CalmWeb actually uses.
+    """
+    try:
+        gc.collect()
+        from .platform.windows import trim_working_set  # noqa: PLC0415
+
+        trim_working_set()
+    except Exception as e:
+        log(f"_release_memory error: {e}")
+
 
 def _resume_protection_if_paused() -> None:
     """End the protection pause caused by a missing whitelist.
@@ -252,7 +268,7 @@ class BlocklistResolver:
     ) -> None:
         self.blocklist_urls: list[str] = list(blocklist_urls)
         self.reload_interval: int = max(60, int(reload_interval or 3600))
-        self.blocked_domains: set[str] = set()
+        self.blocked_domains: DomainHashSet = DomainHashSet()
         self.blocked_ips: set[str] = set()
         self.last_reload: float = 0
         self._lock = threading.Lock()
@@ -293,22 +309,23 @@ class BlocklistResolver:
         with self._loading_lock:
             config._RESOLVER_LOADING.set()
             try:
-                domains: set[str] = set()
+                # Hostnames on one side (hashed), routable IP addresses on
+                # the other, so each can be matched exactly.
+                sink = _BlocklistSink(config.MAX_BLOCKED_DOMAINS)
                 http = make_pool_manager()
-                cap_reached = False
 
                 for url in self.blocklist_urls:
-                    if cap_reached:
-                        break
                     raw_data = _download_content(url, http)
                     if raw_data is None:
                         continue
-                    cap_reached = _parse_blocklist_content(raw_data, url, domains, cap_reached)
+                    cap_reached = _parse_blocklist_content(raw_data, url, sink)
+                    del raw_data  # release the download before the next one
+                    if cap_reached:
+                        break
 
-                # Standard entries only: hostnames on one side, routable IP
-                # addresses on the other, so each can be matched exactly.
-                ips = {d for d in domains if _looks_like_ip(d)}
-                names = domains - ips
+                names = sink.names.build()
+                ips = sink.ips
+                del sink
 
                 # Atomic blocklist update
                 with self._lock:
@@ -316,7 +333,11 @@ class BlocklistResolver:
                     self.blocked_ips = ips
                     self.last_reload = time.time()
 
-                log(f"\u2705 {len(names)} domaines et {len(ips)} IP mis en liste noire")
+                log(
+                    f"\u2705 {len(names)} domaines et {len(ips)} IP mis en liste noire "
+                    f"(index {names.nbytes / 1_048_576:.1f} Mo)"
+                )
+                _release_memory()
 
             except Exception as e:
                 log(f"Erreur dans _load_blocklist: {e}\n{traceback.format_exc()}")

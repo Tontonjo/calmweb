@@ -204,16 +204,11 @@ allow_revocation_http: bool = True
 
 # Elevation buys exactly one thing: the loopback exemptions without which
 # packaged Microsoft applications -- the new Outlook among them -- have no
-# network at all while the proxy is on. CalmWeb offers to restart elevated
-# when that is missing, and starts unprivileged when the offer is declined.
-#
-# An account that cannot elevate in place is never asked in the first place:
-# CalmWeb reads the elevation type off its own token, and only an
-# administrator running with a filtered token gets the prompt (see
-# platform.windows.can_elevate_in_place). Setting this to 0 is therefore no
-# longer needed on a standard account; it stays as a way to refuse the
-# question outright on a machine where even an administrator should not see
-# it.
+# network at all while the proxy is on. Since 1.8.0 the installer sets them,
+# and CalmWeb never shows a UAC prompt: it restarts elevated only when Windows
+# grants it silently (administrator with a filtered token and UAC set to
+# "Elevate without prompting", see platform.windows.can_elevate_silently) and
+# an exemption is still missing. Setting this to 0 forbids even that.
 ask_elevation: bool = True
 
 # A blocked CONNECT cannot show a page -- the client wants a TLS tunnel, not

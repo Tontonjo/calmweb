@@ -1,5 +1,7 @@
 """Tests for calmweb.platform.windows -- AppContainer loopback exemptions.
 
+Version: 1.8.4
+
 These run on any platform: everything that would touch the real system is
 either guarded by ``is_windows()`` or replaced by a fake ``subprocess.run``.
 """
@@ -65,10 +67,8 @@ def _clean_state(monkeypatch: pytest.MonkeyPatch):
     """Pretend to be Windows, with no exemption left over from another test."""
     monkeypatch.setattr(windows, "is_windows", lambda: True)
     monkeypatch.setattr(windows, "is_admin", lambda: True)
-    windows._ADDED_LOOPBACK_EXEMPTIONS.clear()
     stats.reset()
     yield
-    windows._ADDED_LOOPBACK_EXEMPTIONS.clear()
     stats.reset()
 
 
@@ -111,7 +111,7 @@ def test_apply_adds_only_the_missing_packages(monkeypatch):
 
     added = _names(fake.calls, "-a")
     assert BROKER not in added
-    assert added == windows._ADDED_LOOPBACK_EXEMPTIONS
+    assert added == set(windows.LOOPBACK_EXEMPT_PACKAGES) - {BROKER}
 
 
 def test_apply_is_a_no_op_when_everything_is_exempt(monkeypatch):
@@ -121,10 +121,9 @@ def test_apply_is_a_no_op_when_everything_is_exempt(monkeypatch):
 
     assert windows.apply_loopback_exemptions() is True
     assert not any("-a" in args for args in fake.calls)
-    assert not windows._ADDED_LOOPBACK_EXEMPTIONS
 
 
-def test_apply_without_admin_changes_nothing_and_reports(monkeypatch):
+def test_apply_without_admin_changes_nothing_and_stays_quiet(monkeypatch):
     monkeypatch.setattr(windows, "is_admin", lambda: False)
     fake = _FakeRun({"-s": (0, "")})
     monkeypatch.setattr(subprocess, "run", fake)
@@ -134,9 +133,8 @@ def test_apply_without_admin_changes_nothing_and_reports(monkeypatch):
 
     assert windows.apply_loopback_exemptions() is False
     assert not any("-a" in args for args in fake.calls)
-    assert not windows._ADDED_LOOPBACK_EXEMPTIONS
-    # The user is told what to run rather than left with a silent failure.
-    assert any("CheckNetIsolation LoopbackExempt -a" in m for m in messages)
+    # The installer owns the exemptions: a neutral line, no warning.
+    assert not any("⚠" in m for m in messages)
 
 
 def test_apply_reports_failure_but_keeps_going(monkeypatch):
@@ -145,10 +143,8 @@ def test_apply_reports_failure_but_keeps_going(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake)
 
     assert windows.apply_loopback_exemptions() is False
-    # The one that failed is not recorded; the others still are.
-    assert first not in windows._ADDED_LOOPBACK_EXEMPTIONS
-    expected = set(windows.LOOPBACK_EXEMPT_PACKAGES[1:])
-    assert expected == windows._ADDED_LOOPBACK_EXEMPTIONS
+    # The failure does not stop the others from being attempted.
+    assert _names(fake.calls, "-a") == set(windows.LOOPBACK_EXEMPT_PACKAGES)
 
 
 def test_apply_never_raises(monkeypatch):
@@ -170,35 +166,6 @@ def test_apply_is_a_no_op_off_windows(monkeypatch):
 
 
 # ===================================================================
-# remove_loopback_exemptions
-# ===================================================================
-
-
-def test_remove_only_touches_what_this_run_added(monkeypatch):
-    fake = _FakeRun({"-s": (0, LISTING_WITH_BROKER)})
-    monkeypatch.setattr(subprocess, "run", fake)
-    windows.apply_loopback_exemptions()
-    fake.calls.clear()
-
-    windows.remove_loopback_exemptions()
-
-    removed = _names(fake.calls, "-d")
-    # The exemption that was already there is left alone.
-    assert BROKER not in removed
-    assert removed == set(windows.LOOPBACK_EXEMPT_PACKAGES) - {BROKER}
-    assert not windows._ADDED_LOOPBACK_EXEMPTIONS
-
-
-def test_remove_is_a_no_op_when_nothing_was_added(monkeypatch):
-    fake = _FakeRun()
-    monkeypatch.setattr(subprocess, "run", fake)
-
-    windows.remove_loopback_exemptions()
-
-    assert fake.calls == []
-
-
-# ===================================================================
 # enable_proxy / disable_proxy wiring
 # ===================================================================
 
@@ -216,16 +183,20 @@ def test_enable_proxy_applies_the_exemptions(monkeypatch):
     assert called == ["apply"]
 
 
-def test_disable_proxy_removes_the_exemptions(monkeypatch):
-    called: list[str] = []
+def test_disable_proxy_never_removes_the_exemptions(monkeypatch):
+    """They are machine-wide and owned by the installer: quitting CalmWeb, or
+    one user's session ending, must not cut Outlook and Teams off for all."""
     monkeypatch.setattr(windows, "_set_registry_proxy", lambda *_: None)
     monkeypatch.setattr(windows, "refresh_internet_settings", lambda: None)
-    monkeypatch.setattr(subprocess, "run", _FakeRun())
-    monkeypatch.setattr(windows, "remove_loopback_exemptions", lambda: called.append("remove"))
+    fake = _FakeRun({"-s": (0, "")})
+    monkeypatch.setattr(subprocess, "run", fake)
+    windows.apply_loopback_exemptions()
+    fake.calls.clear()
 
     windows.disable_proxy()
 
-    assert called == ["remove"]
+    assert not any("-d" in args for args in fake.calls)
+    assert not hasattr(windows, "remove_loopback_exemptions")
 
 
 # ===================================================================
@@ -250,15 +221,14 @@ def test_packaged_outlook_and_teams_are_covered():
     assert "MSTeams_8wekyb3d8bbwe" in windows.LOOPBACK_EXEMPT_PACKAGES
 
 
-def test_missing_admin_rights_reach_the_activity_feed(monkeypatch):
-    """The log buffer is not enough: this is the one failure with no other trace."""
+def test_missing_admin_rights_stay_out_of_the_activity_feed(monkeypatch):
+    """Since 1.8.0 the installer sets the exemptions: nothing to report."""
     monkeypatch.setattr(windows, "is_admin", lambda: False)
     monkeypatch.setattr(subprocess, "run", _FakeRun({"-s": (0, "")}))
 
     windows.apply_loopback_exemptions()
 
-    details = [e.detail for e in stats.events(kinds=("system",))]
-    assert any("administrateur" in d for d in details)
+    assert list(stats.events(kinds=("system",))) == []
 
 
 def test_added_exemptions_reach_the_activity_feed(monkeypatch):
@@ -282,27 +252,13 @@ def test_a_refused_exemption_is_reported(monkeypatch):
     assert any("refusée" in d for d in details)
 
 
-def test_missing_admin_rights_raise_a_desktop_notification(monkeypatch):
-    announced: list = []
+def test_missing_admin_rights_raise_no_desktop_notification(monkeypatch):
+    """The notification is gone: windows no longer imports it at all."""
     monkeypatch.setattr(windows, "is_admin", lambda: False)
-    monkeypatch.setattr(windows, "notify_loopback_blocked", announced.append)
     monkeypatch.setattr(subprocess, "run", _FakeRun({"-s": (0, "")}))
 
-    windows.apply_loopback_exemptions()
-
-    assert announced == [list(windows.LOOPBACK_EXEMPT_PACKAGES)]
-
-
-def test_nothing_is_announced_when_the_exemptions_are_in_place(monkeypatch):
-    announced: list = []
-    listing = "\n".join(pkg.lower() for pkg in windows.LOOPBACK_EXEMPT_PACKAGES)
-    monkeypatch.setattr(windows, "is_admin", lambda: False)
-    monkeypatch.setattr(windows, "notify_loopback_blocked", announced.append)
-    monkeypatch.setattr(subprocess, "run", _FakeRun({"-s": (0, listing)}))
-
-    windows.apply_loopback_exemptions()
-
-    assert announced == []
+    assert not hasattr(windows, "notify_loopback_blocked")
+    assert windows.apply_loopback_exemptions() is False
 
 
 # ===================================================================
@@ -351,13 +307,26 @@ class TestElevation:
         assert windows.elevation_would_help() is False
 
     def test_offer_when_an_exemption_is_missing(self, monkeypatch):
-        """An administrator running with a filtered token is the one account
-        the prompt is for: accepting runs CalmWeb as the same user."""
+        """An administrator running with a filtered token, on a machine where
+        UAC elevates without asking: the relaunch is silent and runs CalmWeb
+        as the same user."""
         monkeypatch.setattr(windows, "is_admin", lambda: False)
         monkeypatch.setattr(windows, "can_elevate_in_place", lambda: True)
+        monkeypatch.setattr(windows, "can_elevate_silently", lambda: True)
         monkeypatch.setattr(subprocess, "run", _FakeRun({"-s": (0, "")}))
 
         assert windows.elevation_would_help() is True
+
+    def test_never_offer_when_uac_would_prompt(self, monkeypatch):
+        """CalmWeb never shows a UAC prompt, even with an exemption missing."""
+        monkeypatch.setattr(windows, "is_admin", lambda: False)
+        monkeypatch.setattr(windows, "can_elevate_in_place", lambda: True)
+        monkeypatch.setattr(windows, "can_elevate_silently", lambda: False)
+        monkeypatch.setattr(
+            windows, "missing_loopback_exemptions", lambda: pytest.fail("not needed")
+        )
+
+        assert windows.elevation_would_help() is False
 
     # -- relaunch_as_admin ---------------------------------------------
 
@@ -535,17 +504,18 @@ class TestStandardAccountIsNeverAsked:
 
         assert windows.elevation_would_help() is False
 
-    def test_the_reason_is_recorded_once(self, monkeypatch):
+    def test_the_reason_is_logged_once_and_not_announced(self, monkeypatch):
         monkeypatch.setattr(windows, "is_admin", lambda: False)
         monkeypatch.setattr(windows, "can_elevate_in_place", lambda: False)
         monkeypatch.setattr(windows, "_STANDARD_ACCOUNT_LOGGED", False, raising=False)
+        messages: list[str] = []
+        monkeypatch.setattr(windows, "log", messages.append)
 
         windows.elevation_would_help()
         windows.elevation_would_help()
 
-        details = [e.detail for e in stats.events(kinds=("system",))]
-        events = [d for d in details if "administrateur" in d]
-        assert len(events) == 1
+        assert len([m for m in messages if "administrateur" in m]) == 1
+        assert list(stats.events(kinds=("system",))) == []
 
     def test_nothing_is_relaunched_for_a_standard_account(self, monkeypatch):
         monkeypatch.setattr(windows, "is_admin", lambda: False)
@@ -601,3 +571,163 @@ class TestSystemProxyReadback:
         monkeypatch.setattr(windows, "system_proxy_state", lambda: (False, ""))
 
         assert windows.enable_proxy("127.0.0.1", 8080) is False
+
+
+# ===================================================================
+# Silent elevation: only when UAC would not show a prompt
+# ===================================================================
+
+
+class TestCanElevateSilently:
+    def test_already_elevated(self, monkeypatch):
+        monkeypatch.setattr(windows, "is_admin", lambda: True)
+
+        assert windows.can_elevate_silently() is True
+
+    def test_filtered_admin_with_elevate_without_prompting(self, monkeypatch):
+        monkeypatch.setattr(windows, "is_admin", lambda: False)
+        monkeypatch.setattr(windows, "can_elevate_in_place", lambda: True)
+        monkeypatch.setattr(windows, "consent_prompt_behavior_admin", lambda: 0)
+
+        assert windows.can_elevate_silently() is True
+
+    @pytest.mark.parametrize("policy", [1, 2, 3, 4, 5, None])
+    def test_any_policy_that_prompts_is_refused(self, monkeypatch, policy):
+        monkeypatch.setattr(windows, "is_admin", lambda: False)
+        monkeypatch.setattr(windows, "can_elevate_in_place", lambda: True)
+        monkeypatch.setattr(windows, "consent_prompt_behavior_admin", lambda: policy)
+
+        assert windows.can_elevate_silently() is False
+
+    def test_standard_account_is_refused(self, monkeypatch):
+        monkeypatch.setattr(windows, "is_admin", lambda: False)
+        monkeypatch.setattr(windows, "can_elevate_in_place", lambda: False)
+        monkeypatch.setattr(
+            windows, "consent_prompt_behavior_admin", lambda: pytest.fail("not needed")
+        )
+
+        assert windows.can_elevate_silently() is False
+
+
+# ===================================================================
+# Proxy switched off on session end and after an unclean exit
+# ===================================================================
+
+
+class TestSessionEnd:
+    @pytest.fixture
+    def cleared(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            windows, "clear_system_proxy_fast", lambda: calls.append("clear") or True
+        )
+        return calls
+
+    def test_query_end_session_clears_the_proxy_and_accepts(self, cleared):
+        result = windows.handle_session_message(
+            windows._WM_QUERYENDSESSION, 0, lambda: pytest.fail("too early"), None
+        )
+
+        assert result == 1
+        assert cleared == ["clear"]
+
+    def test_end_session_runs_the_full_cleanup(self, cleared):
+        ended: list[bool] = []
+        result = windows.handle_session_message(
+            windows._WM_ENDSESSION, 1, lambda: ended.append(True), None
+        )
+
+        assert result == 0
+        assert ended == [True]
+
+    def test_cancelled_shutdown_restores_the_protection(self, cleared):
+        resumed: list[bool] = []
+        result = windows.handle_session_message(
+            windows._WM_ENDSESSION,
+            0,
+            lambda: pytest.fail("session did not end"),
+            lambda: resumed.append(True),
+        )
+
+        assert result == 0
+        assert resumed == [True]
+
+    def test_a_failing_callback_never_raises(self, cleared):
+        def explode():
+            raise RuntimeError("boom")
+
+        assert windows.handle_session_message(windows._WM_ENDSESSION, 1, explode, None) == 0
+
+    def test_other_messages_go_to_the_default_handler(self, cleared):
+        assert windows.handle_session_message(0x0001, 0, None, None) is None
+        assert cleared == []
+
+    def test_disable_proxy_writes_the_registry_before_any_child_process(self, monkeypatch):
+        order: list[str] = []
+        monkeypatch.setattr(
+            windows, "_set_registry_proxy", lambda *_: order.append("registry")
+        )
+        monkeypatch.setattr(windows, "refresh_internet_settings", lambda: None)
+        monkeypatch.setattr(
+            subprocess, "run", lambda *_a, **_k: order.append("process")
+        )
+
+        windows.disable_proxy()
+
+        assert order[0] == "registry"
+
+
+class TestStaleProxy:
+    def test_a_leftover_calmweb_proxy_is_cleared(self, monkeypatch):
+        writes: list[tuple] = []
+        monkeypatch.setattr(windows, "system_proxy_state", lambda: (True, "127.0.0.1:8080"))
+        monkeypatch.setattr(windows, "_set_registry_proxy", lambda *a: writes.append(a))
+        monkeypatch.setattr(windows, "refresh_internet_settings", lambda: None)
+
+        assert windows.clear_stale_system_proxy() is True
+        assert writes == [(0, "")]
+
+    def test_another_proxy_is_left_alone(self, monkeypatch):
+        monkeypatch.setattr(
+            windows, "system_proxy_state", lambda: (True, "proxy.corp.local:3128")
+        )
+        monkeypatch.setattr(
+            windows, "_set_registry_proxy", lambda *_: pytest.fail("not ours")
+        )
+
+        assert windows.clear_stale_system_proxy() is False
+
+    def test_nothing_to_do_when_the_proxy_is_off(self, monkeypatch):
+        monkeypatch.setattr(windows, "system_proxy_state", lambda: (False, ""))
+        monkeypatch.setattr(
+            windows, "_set_registry_proxy", lambda *_: pytest.fail("already off")
+        )
+
+        assert windows.clear_stale_system_proxy() is False
+
+
+# ===================================================================
+# Machine-wide autostart replaces the scheduled task
+# ===================================================================
+
+
+class TestLegacyScheduledTask:
+    def test_existing_task_is_deleted(self, monkeypatch):
+        fake = _FakeRun({"/Query": (0, "CalmWeb"), "/Delete": (0, "")})
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert windows.remove_legacy_scheduled_task() is True
+        assert any("/Delete" in call for call in fake.calls)
+
+    def test_absent_task_is_not_an_error(self, monkeypatch):
+        fake = _FakeRun({"/Query": (1, "")})
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert windows.remove_legacy_scheduled_task() is True
+        assert not any("/Delete" in call for call in fake.calls)
+
+    def test_failed_deletion_is_reported(self, monkeypatch):
+        fake = _FakeRun({"/Query": (0, "CalmWeb"), "/Delete": (1, "access denied")})
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert windows.remove_legacy_scheduled_task() is False

@@ -1,6 +1,6 @@
 """CalmWeb entry point (``python -m calmweb``).
 
-Version: 1.7.7
+Version: 1.8.4
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from .config_io import (
 from .i18n import detect_system_language, set_language, t
 from .log import log
 from .platform.windows import (
+    clear_stale_system_proxy,
     disable_proxy,
     enable_proxy,
     register_shutdown_handler,
@@ -43,6 +44,7 @@ from .tray import (
     create_image,
     quit_app,
     refresh_tray,
+    release_system_state,
     run_log_viewer,
     update_menu,
 )
@@ -87,6 +89,13 @@ def _retry_whitelist_until_available() -> None:
             log(f"Nouvelle tentative de liste blanche: {e}")
 
 
+def _resume_after_cancelled_shutdown() -> None:
+    """Put the system proxy back when Windows reports a cancelled shutdown."""
+    if config._SHUTDOWN_EVENT.is_set() or not config.block_enabled:
+        return
+    enable_proxy()
+
+
 def run_calmweb() -> None:
     """Main application startup sequence.
 
@@ -96,7 +105,20 @@ def run_calmweb() -> None:
     4. Set the system proxy
     5. Start the system tray icon
     6. Handle signals for graceful termination
+
+    The system proxy is switched off on every way out: tray "Quit"
+    (``quit_app``), Windows shutdown / restart / logoff (hidden session
+    window, see ``register_shutdown_handler``), and -- for a crash, a forced
+    kill or a power cut -- at the next start (``clear_stale_system_proxy``).
     """
+    # A previous run that could not clean up (power cut, forced kill) left the
+    # proxy pointing at a port nobody listens on: no network until the backend
+    # is up, and the update check below would fail through it.
+    try:
+        clear_stale_system_proxy()
+    except Exception as e:
+        log(f"Error clearing a stale system proxy: {e}")
+
     def _initialize_backend(icon: Icon) -> None:
         """Initialize all heavy services after tray icon becomes visible."""
         try:
@@ -154,6 +176,17 @@ def run_calmweb() -> None:
         except Exception as e:
             log(f"Error removing the legacy QUIC firewall rule: {e}")
 
+        # Shutdown / logoff handlers go in *before* the proxy is switched on,
+        # so there is no window in which Windows could end the session with
+        # the proxy on and nobody listening for it.
+        try:
+            register_shutdown_handler(
+                on_session_end=release_system_state,
+                on_session_resume=_resume_after_cancelled_shutdown,
+            )
+        except Exception as e:
+            log(f"Error registering shutdown handler: {e}")
+
         try:
             if config.block_enabled:
                 enable_proxy()
@@ -166,12 +199,6 @@ def run_calmweb() -> None:
         # runs once an hour, and only when traffic goes through the proxy.
         if config.protection_paused_no_whitelist:
             threading.Thread(target=_retry_whitelist_until_available, daemon=True).start()
-
-        # Register shutdown/logoff handlers to ensure proxy is disabled on exit
-        try:
-            register_shutdown_handler()
-        except Exception as e:
-            log(f"Error registering shutdown handler: {e}")
 
         with contextlib.suppress(Exception):
             icon.title = "Calm Web"
@@ -284,8 +311,9 @@ def main() -> None:
         return
 
     # Before the lock: an elevated copy of CalmWeb would find the lock held by
-    # this unprivileged one and refuse to start. Declining is fine -- CalmWeb
-    # then runs without privileges, which costs only the loopback exemptions.
+    # this unprivileged one and refuse to start. Elevation is only attempted
+    # when Windows grants it without a UAC prompt; otherwise CalmWeb runs
+    # unprivileged, and the installer has already set the loopback exemptions.
     if read_bool_option("ask_elevation") and request_elevation_if_useful():
         return
 

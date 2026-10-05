@@ -46,7 +46,7 @@ BOOL_OPTIONS: dict[str, bool] = {
     # Deliberately absent from the window and the tray menu: an escape
     # hatch for diagnosis, not a choice to put in front of the user.
     "allow_revocation_http": True,
-    # Also absent from the interface: answered by the UAC prompt itself.
+    # Also absent from the interface: silent elevation only, never a prompt.
     "ask_elevation": True,
     "notify_on_block": False,
 }

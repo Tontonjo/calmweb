@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "CalmWeb"
-version = "1.7.7"
+version = "1.8.4"
 description = "A system-wide web proxy filter to protect users from ads, scams, and remote control software"
 readme = "README.md"
 license = {file = "LICENSE"}

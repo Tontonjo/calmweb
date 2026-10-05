@@ -6,6 +6,8 @@ settings, lists, about).  Everything user-facing goes through
 :func:`calmweb.i18n.t`, so the whole interface can flip between French and
 English without restarting.
 
+Version: 1.8.4
+
 The window lives in its own thread with its own ``mainloop``; the rest of
 the application only ever calls :func:`show_dashboard`.
 """
@@ -381,7 +383,7 @@ class Dashboard(ctk.CTk):
 
         self._rows: dict[str, DetailRow] = {}
         for index, key in enumerate(
-            ("proxy", "lists", "whitelist", "lastreload", "connections", "http"),
+            ("lists", "whitelist", "lastreload", "connections"),
             start=1,
         ):
             row = DetailRow(details, t(f"status.detail.{key}"))
@@ -1094,10 +1096,10 @@ class Dashboard(ctk.CTk):
             total = int(counts.get("blocked", 0)) + int(counts.get("manual", 0))
             self._card_domains.set(f"{total:,}".replace(",", " ") if total else "—")
 
-            self._rows["proxy"].set(f"{config.PROXY_BIND_IP}:{config.PROXY_PORT}")
+            # Number of blocklist sources configured (the domain total is
+            # already on the "Filtered domains" card).
             self._rows["lists"].set(
-                f"{int(counts.get('blocked', 0)):,}".replace(",", " ") if counts else
-                t("common.loading")
+                t("status.lists.count", n=len(config.blocklist_source_urls))
             )
             self._rows["whitelist"].set(
                 f"{int(counts.get('whitelist', 0))} + {int(counts.get('networks', 0))} CIDR"
@@ -1108,7 +1110,6 @@ class Dashboard(ctk.CTk):
                 time.strftime("%H:%M:%S", time.localtime(last)) if last else t("common.never")
             )
             self._rows["connections"].set(str(snapshot["active"]))
-            self._rows["http"].set(t("status.http.value"))
 
     def _tick(self) -> None:
         if self._closing:

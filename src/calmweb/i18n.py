@@ -1,5 +1,7 @@
 """Lightweight bilingual (FR/EN) string table for the CalmWeb user interface.
 
+Version: 1.8.4
+
 The application ships in French by default because that is its primary
 audience, but every user-facing string in the GUI and the tray menu goes
 through :func:`t` so the language can be switched at runtime.
@@ -84,14 +86,19 @@ STRINGS: dict[str, dict[str, str]] = {
     "status.detail.title": {"fr": "Détails techniques", "en": "Technical details"},
     "status.detail.proxy": {"fr": "Proxy local", "en": "Local proxy"},
     "status.detail.lists": {"fr": "Listes de blocage", "en": "Blocklists"},
-    "status.detail.whitelist": {"fr": "Liste blanche", "en": "Whitelist"},
-    "status.detail.lastreload": {"fr": "Dernière mise à jour", "en": "Last refresh"},
-    "status.detail.connections": {"fr": "Connexions actives", "en": "Active connections"},
-    "status.detail.http": {"fr": "Versions HTTP", "en": "HTTP versions"},
-    "status.http.value": {
-        "fr": "HTTP/1.1 filtré · HTTP/2 et HTTP/3 relayés dans le tunnel TLS",
-        "en": "HTTP/1.1 filtered · HTTP/2 and HTTP/3 relayed inside the TLS tunnel",
+    "status.lists.count": {
+        "fr": "{n} liste(s) noire(s) configurée(s)",
+        "en": "{n} blocklist(s) configured",
     },
+    "status.detail.whitelist": {
+        "fr": "Domaines et IP autorisés",
+        "en": "Allowed domains and IPs",
+    },
+    "status.detail.lastreload": {
+        "fr": "Dernière mise à jour des listes",
+        "en": "Last list update",
+    },
+    "status.detail.connections": {"fr": "Connexions actives", "en": "Active connections"},
     "status.refresh": {"fr": "Mettre à jour les listes", "en": "Refresh the lists"},
     # -- activity ----------------------------------------------------------
     "activity.filter.all": {"fr": "Tout", "en": "All"},
@@ -323,18 +330,6 @@ STRINGS: dict[str, dict[str, str]] = {
     "notify.blocked.more": {
         "fr": "{host} et {n} autre(s) domaine(s)",
         "en": "{host} and {n} more domain(s)",
-    },
-    "notify.loopback.title": {
-        "fr": "Applications Microsoft sans accès au proxy",
-        "en": "Microsoft apps cannot reach the proxy",
-    },
-    "notify.loopback.body": {
-        "fr": "Windows empêche {n} application(s) isolée(s) — nouvel Outlook, Teams, "
-        "connexion Microsoft — de joindre le proxy : elles resteront sans réseau. "
-        "Relancez Calm Web en tant qu'administrateur.",
-        "en": "Windows is stopping {n} isolated app(s) — new Outlook, Teams, Microsoft "
-        "sign-in — from reaching the proxy: they will have no network at all. "
-        "Restart Calm Web as administrator.",
     },
 }
 

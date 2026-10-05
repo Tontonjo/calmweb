@@ -1,5 +1,7 @@
 """Desktop notifications for blocked HTTPS connections.
 
+Version: 1.8.4
+
 Why this exists
 ---------------
 A blocked ``CONNECT`` cannot show a page.  The client asked for a TLS tunnel
@@ -64,9 +66,6 @@ _recent: dict[str, float] = {}
 #: When the last notification went out; None until one has.
 _last_sent: float | None = None
 _worker: threading.Thread | None = None
-
-#: The loopback warning is announced once per run, not once per toggle.
-_loopback_announced: bool = False
 
 
 def _in_cooldown(last: float | None, now: float) -> bool:
@@ -193,32 +192,3 @@ def _send(batch: dict[str, str]) -> None:
         show_notification(t("notify.blocked.title"), body)
     except Exception as e:
         log(f"notify send error: {e}")
-
-
-def notify_loopback_blocked(packages: list[str]) -> None:
-    """Announce that isolated Microsoft applications cannot reach the proxy.
-
-    Deliberately **not** governed by ``notify_on_block``.  That option covers
-    individual filtering decisions: frequent, debatable, and already visible as
-    a page that will not load.  This is a different animal -- a total blackout
-    for the applications concerned, with no error message anywhere, because
-    Windows drops their connection before the proxy can see it.  The new
-    Outlook does not open at all, and nothing on screen says why.
-
-    Announced once per run, however many times the proxy is toggled.
-    """
-    global _loopback_announced
-    try:
-        if _loopback_announced or not packages:
-            return
-        _loopback_announced = True
-
-        from .i18n import t
-        from .tray import show_notification
-
-        show_notification(
-            t("notify.loopback.title"),
-            t("notify.loopback.body", n=len(packages)),
-        )
-    except Exception as e:
-        log(f"notify loopback error: {e}")

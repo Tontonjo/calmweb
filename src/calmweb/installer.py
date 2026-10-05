@@ -1,115 +1,33 @@
-"""CalmWeb installer: copy exe, firewall rule, scheduled task, and launch."""
+"""CalmWeb installer: copy exe, firewall rule, autostart for all users, and launch.
+
+Version: 1.8.4
+
+Normally superseded by the Inno Setup package (installer/calmweb.iss), which
+performs the same steps; this path runs when the executable is started under
+its build name ``calmweb_installer.exe``.  Every privileged step needs the
+process to be elevated, and is reported in the log when it is not.
+"""
 
 from __future__ import annotations
 
 import contextlib
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 import time
 
 from . import config
 from .config_io import ensure_custom_cfg_exists
 from .log import log
 from .platform import is_windows
-from .platform.windows import add_firewall_rule
-
-# ===================================================================
-# Scheduled task XML template
-# ===================================================================
-
-SCHEDULED_TASK_XML: str = """\
-<?xml version="1.0" encoding="utf-16"?>
-    <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-      <RegistrationInfo>
-        <Date>2025-10-26T10:16:48</Date>
-        <Author>Tonton Jo</Author>
-        <URI>CalmWeb</URI>
-      </RegistrationInfo>
-      <Triggers>
-        <LogonTrigger>
-          <StartBoundary>2025-10-26T10:16:00</StartBoundary>
-          <Enabled>true</Enabled>
-        </LogonTrigger>
-      </Triggers>
-      <Principals>
-        <Principal id="Author">
-          <GroupId>S-1-5-32-544</GroupId>
-          <RunLevel>HighestAvailable</RunLevel>
-        </Principal>
-      </Principals>
-      <Settings>
-        <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-        <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-        <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-        <AllowHardTerminate>true</AllowHardTerminate>
-        <StartWhenAvailable>false</StartWhenAvailable>
-        <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-        <IdleSettings>
-          <StopOnIdleEnd>true</StopOnIdleEnd>
-          <RestartOnIdle>false</RestartOnIdle>
-        </IdleSettings>
-        <AllowStartOnDemand>true</AllowStartOnDemand>
-        <Enabled>true</Enabled>
-        <Hidden>false</Hidden>
-        <RunOnlyIfIdle>false</RunOnlyIfIdle>
-        <WakeToRun>false</WakeToRun>
-        <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-        <Priority>7</Priority>
-      </Settings>
-      <Actions Context="Author">
-        <Exec>
-          <Command>"C:\\Program Files\\CalmWeb\\calmweb.exe"</Command>
-        </Exec>
-      </Actions>
-    </Task>"""
-
-
-# ===================================================================
-# Scheduled task helper
-# ===================================================================
-
-
-def add_task_from_xml(xml_content: str) -> None:
-    """Create a Windows scheduled task from an XML definition.
-
-    Writes the XML to a temporary file, invokes ``schtasks /Create``,
-    and cleans up the temp file afterwards.
-    """
-    tmp_file_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-16") as tmp_file:
-            tmp_file.write(xml_content)
-            tmp_file_path = tmp_file.name
-
-        if tmp_file_path and os.path.exists(tmp_file_path):
-            try:
-                subprocess.run(
-                    [
-                        "schtasks",
-                        "/Create",
-                        "/tn",
-                        "CalmWeb",
-                        "/XML",
-                        tmp_file_path,
-                        "/F",
-                    ],
-                    check=True,
-                )
-                log("Scheduled task added successfully.")
-            except Exception as e:
-                log(f"Error adding scheduled task: {e}")
-        else:
-            log(f"Error: temporary XML file could not be created at {tmp_file_path}")
-    except Exception as e:
-        log(f"Error in add_task_from_xml: {e}")
-    finally:
-        if tmp_file_path and os.path.exists(tmp_file_path):
-            with contextlib.suppress(Exception):
-                os.remove(tmp_file_path)
-
+from .platform.windows import (
+    add_firewall_rule,
+    apply_loopback_exemptions,
+    is_admin,
+    register_autostart_all_users,
+    remove_legacy_scheduled_task,
+    remove_quic_policy,
+)
 
 # ===================================================================
 # Main installation entry point
@@ -125,9 +43,11 @@ def install() -> None:
       3. Ensure custom.cfg exists
       4. Copy the current exe to the install directory
       5. Add a Windows Firewall allow rule
-      6. Register a scheduled task from XML
-      7. Launch the installed exe
-      8. Exit
+      6. Remove the legacy scheduled task, start at logon for all users
+      7. Set the loopback exemptions and remove the legacy QUIC rule, so the
+         application itself never needs to elevate
+      8. Launch the installed exe
+      9. Exit
     """
     if not is_windows():
         log("Installation is only supported on Windows.")
@@ -172,10 +92,18 @@ def install() -> None:
     # 4. Add firewall rule
     add_firewall_rule(os.path.join(config.INSTALL_DIR, config.EXE_NAME))
 
-    # 5. Register scheduled task
-    add_task_from_xml(SCHEDULED_TASK_XML)
+    # 5. Autostart: HKLM Run replaces the 1.7.x scheduled task
+    if not is_admin():
+        log("[⚠️] Installation sans droits administrateur: les étapes système vont échouer.")
+    remove_legacy_scheduled_task()
+    register_autostart_all_users(os.path.join(config.INSTALL_DIR, config.EXE_NAME))
 
-    # 6. Launch the installed executable
+    # 6. Privileged one-time setup, so the application never has to elevate
+    if is_admin():
+        apply_loopback_exemptions()
+        remove_quic_policy()
+
+    # 7. Launch the installed executable
     try:
         target_file = os.path.join(config.INSTALL_DIR, config.EXE_NAME)
         os.startfile(target_file)  # type: ignore[attr-defined]

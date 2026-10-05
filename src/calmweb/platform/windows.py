@@ -1,5 +1,7 @@
 """Windows-specific functionality for CalmWeb.
 
+Version: 1.8.4
+
 Each function has its own platform guard and returns early / is a no-op
 when not running on Windows.
 """
@@ -13,6 +15,8 @@ import os
 import socket
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 
 try:  # Windows-only; importing the module elsewhere (tests, CI) must still work
     import winreg
@@ -21,7 +25,6 @@ except ImportError:  # pragma: no cover - exercised on non-Windows only
 
 from .. import stats
 from ..log import log
-from ..notify import notify_loopback_blocked
 from . import is_windows
 
 #: ``CREATE_NO_WINDOW`` only exists on Windows. Reading it through getattr
@@ -204,11 +207,6 @@ LOOPBACK_EXEMPT_PACKAGES: tuple[str, ...] = (
 #: freeze the proxy toggle.
 CHECKNETISOLATION_TIMEOUT_SECS: int = 20
 
-#: Exemptions added by *this* run, so shutting down only undoes our own work
-#: and never removes one the user (or another proxy tool) set up.
-_ADDED_LOOPBACK_EXEMPTIONS: set[str] = set()
-
-
 def _run_checknetisolation(args: list[str]) -> tuple[int, str]:
     """Run CheckNetIsolation and return ``(returncode, output)``. Never raises."""
     try:
@@ -242,12 +240,15 @@ def missing_loopback_exemptions() -> list[str]:
 def apply_loopback_exemptions() -> bool:
     """Let the Windows authentication brokers reach the proxy on 127.0.0.1.
 
+    Exemptions are never removed at runtime, only by the uninstaller: see
+    :func:`disable_proxy`.
+
     Returns True when nothing is left to do -- either every package was
     already exempted, or this call exempted them.  Adding an exemption needs
-    administrator rights; without them the packages are named in the log
-    along with the command to run once, because the symptom otherwise looks
-    like a CalmWeb bug with no trace anywhere: the OS refuses the connection
-    before the proxy ever sees it.
+    administrator rights.  Since 1.8.0 the installer sets them machine-wide,
+    for every user, once and for all, so an unprivileged run has nothing to
+    warn about: it leaves a neutral line in the log and nothing else (no
+    notification, no activity-feed event).
     """
     if not is_windows():
         return True
@@ -259,32 +260,17 @@ def apply_loopback_exemptions() -> bool:
             return True
 
         if not is_admin():
-            commands = "  ".join(
-                f'CheckNetIsolation LoopbackExempt -a -n="{pkg}"' for pkg in missing
-            )
-            message = (
-                "Applications Microsoft isolées sans accès au proxy "
-                f"({len(missing)}) — droits administrateur requis"
-            )
+            # Not a warning: the installer owns the exemptions.
             log(
-                "[⚠️] Les applications Microsoft empaquetées (nouvel Outlook, nouveau "
-                "Teams) et le courtier d'authentification n'ont pas le droit de joindre "
-                "127.0.0.1, donc pas le proxy: elles restent sans réseau et Outlook ne "
-                "s'ouvre pas. Relancez CalmWeb en tant qu'administrateur, ou lancez une "
-                f"fois dans une invite de commandes administrateur: {commands}"
+                "Exemptions loopback non vérifiées dans cette session (sans droits "
+                "administrateur); elles sont posées par l'installeur."
             )
-            stats.record("system", detail=message)
-            # The Système tab is no help to someone whose Outlook will not
-            # open: they are not looking at CalmWeb, they are looking at an
-            # application that does nothing. Say it out loud, once.
-            notify_loopback_blocked(missing)
             return False
 
         complete = True
         for package in missing:
             code, out = _run_checknetisolation(["LoopbackExempt", "-a", f"-n={package}"])
             if code == 0:
-                _ADDED_LOOPBACK_EXEMPTIONS.add(package)
                 log(f"Exemption loopback ajoutée pour {package}")
                 stats.record("system", detail=f"Exemption loopback ajoutée: {package}")
             else:
@@ -296,20 +282,6 @@ def apply_loopback_exemptions() -> bool:
         log(f"apply_loopback_exemptions error: {e}")
         stats.record("system", detail=f"Exemptions loopback: échec ({e})")
         return False
-
-
-def remove_loopback_exemptions() -> None:
-    """Undo the exemptions this run added, leaving pre-existing ones in place."""
-    if not is_windows() or not _ADDED_LOOPBACK_EXEMPTIONS:
-        return
-    for package in sorted(_ADDED_LOOPBACK_EXEMPTIONS):
-        code, out = _run_checknetisolation(["LoopbackExempt", "-d", f"-n={package}"])
-        if code != 0:
-            log(
-                f"[⚠️] Retrait de l'exemption loopback impossible pour {package}: "
-                f"{out.strip()[:200]}"
-            )
-    _ADDED_LOOPBACK_EXEMPTIONS.clear()
 
 
 # ===================================================================
@@ -343,6 +315,18 @@ _ELEVATION_TYPE_LIMITED: int = 3
 
 #: The standard-account notice is worth exactly one line per run.
 _STANDARD_ACCOUNT_LOGGED: bool = False
+
+#: Same for the "elevation would need a prompt" notice.
+_PROMPT_REQUIRED_LOGGED: bool = False
+
+#: UAC policy key and the value that decides whether an administrator running
+#: with a filtered token is prompted when a program asks for elevation.
+_UAC_POLICY_KEY: str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+_UAC_CONSENT_VALUE: str = "ConsentPromptBehaviorAdmin"
+
+#: ``ConsentPromptBehaviorAdmin = 0``: "Elevate without prompting".  The only
+#: setting under which a ``runas`` request completes with no UAC dialog.
+_CONSENT_ELEVATE_WITHOUT_PROMPT: int = 0
 
 
 def elevation_type() -> int:
@@ -414,20 +398,74 @@ def can_elevate_in_place() -> bool:
     return elevation_type() in (_ELEVATION_TYPE_LIMITED, _ELEVATION_TYPE_FULL)
 
 
+def consent_prompt_behavior_admin() -> int | None:
+    """Return the UAC ``ConsentPromptBehaviorAdmin`` policy, or None if unreadable."""
+    if not is_windows() or winreg is None:
+        return None
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            _UAC_POLICY_KEY,
+            0,
+            winreg.KEY_QUERY_VALUE | getattr(winreg, "KEY_WOW64_64KEY", 0),
+        )
+        try:
+            return int(winreg.QueryValueEx(key, _UAC_CONSENT_VALUE)[0])
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return None
+    except Exception as e:
+        log(f"consent_prompt_behavior_admin error: {e}")
+        return None
+
+
+def can_elevate_silently() -> bool:
+    """True when CalmWeb can run elevated without any UAC dialog being shown.
+
+    CalmWeb never puts a UAC prompt in front of the user.  Elevation is only
+    attempted when Windows would grant it on its own, which is the case when:
+
+    * the process is already elevated, or
+    * the account is an administrator running with a filtered token *and* the
+      UAC policy is "Elevate without prompting" (``ConsentPromptBehaviorAdmin
+      = 0``).
+
+    Everywhere else, the work that needs administrator rights (loopback
+    exemptions, legacy firewall rule removal) is done once by the installer,
+    which runs elevated anyway.
+    """
+    if not is_windows():
+        return False
+    if is_admin():
+        return True
+    if not can_elevate_in_place():
+        return False
+    return consent_prompt_behavior_admin() == _CONSENT_ELEVATE_WITHOUT_PROMPT
+
+
+def _log_prompt_required_once() -> None:
+    """Say once per run why CalmWeb does not elevate on this account."""
+    global _PROMPT_REQUIRED_LOGGED
+    if _PROMPT_REQUIRED_LOGGED:
+        return
+    _PROMPT_REQUIRED_LOGGED = True
+    log(
+        "Élévation silencieuse impossible (UAC demanderait une confirmation): "
+        "CalmWeb démarre sans privilèges et sans invite."
+    )
+
+
 def _log_standard_account_once() -> None:
     """Say once per run why the loopback exemptions are being skipped."""
     global _STANDARD_ACCOUNT_LOGGED
     if _STANDARD_ACCOUNT_LOGGED:
         return
     _STANDARD_ACCOUNT_LOGGED = True
-    message = "Compte sans droits administrateur: démarrage sans élévation"
     log(
-        "Ce compte ne peut pas être élevé: CalmWeb démarre sans privilèges et "
-        "configure le proxy pour cet utilisateur. Les exemptions loopback "
-        "(nouvel Outlook, nouveau Teams) demandent un administrateur et "
-        "peuvent être posées une fois pour toutes depuis un compte qui en a."
+        "Compte sans droits administrateur: CalmWeb démarre sans élévation et "
+        "configure le proxy pour cet utilisateur."
     )
-    stats.record("system", detail=message)
 
 
 def elevation_would_help() -> bool:
@@ -439,8 +477,9 @@ def elevation_would_help() -> bool:
     asked the moment it stops mattering, and an unprivileged start is normal
     and silent once the exemptions are in place.
 
-    It also stops being asked when the account could not answer it usefully:
-    see :func:`can_elevate_in_place`.
+    It also stops being asked when the account could not answer it usefully
+    (see :func:`can_elevate_in_place`), and whenever elevating would show a
+    UAC prompt (see :func:`can_elevate_silently`): CalmWeb never prompts.
     """
     if not is_windows() or is_admin():
         return False
@@ -449,6 +488,9 @@ def elevation_would_help() -> bool:
     # credentials prompt to lose. See can_elevate_in_place.
     if not can_elevate_in_place():
         _log_standard_account_once()
+        return False
+    if not can_elevate_silently():
+        _log_prompt_required_once()
         return False
     return bool(missing_loopback_exemptions())
 
@@ -497,12 +539,13 @@ def relaunch_as_admin() -> bool:
 
 
 def request_elevation_if_useful() -> bool:
-    """Offer a restart with elevation when there is something to gain from it.
+    """Restart elevated, silently, when there is something to gain from it.
 
     Returns True when an elevated copy was started and this process must exit;
-    False in every other case, including a refusal -- CalmWeb then runs
-    unprivileged rather than not running at all, since everything except the
-    loopback exemptions works perfectly well that way.
+    False in every other case -- CalmWeb then runs unprivileged rather than
+    not running at all, since everything except the loopback exemptions works
+    perfectly well that way, and the installer has normally set those already.
+    No UAC prompt is ever shown: see :func:`elevation_would_help`.
     """
     try:
         if NO_ELEVATE_FLAG in sys.argv:
@@ -519,7 +562,8 @@ def request_elevation_if_useful() -> bool:
 # System proxy
 # ===================================================================
 
-def refresh_internet_settings():
+def refresh_internet_settings() -> None:
+    """Tell WinINET clients that the proxy settings changed."""
     INTERNET_OPTION_SETTINGS_CHANGED = 39
     INTERNET_OPTION_REFRESH = 37
     log("Actualisation des paramètres réseaux")
@@ -645,34 +689,65 @@ def enable_proxy(
         return False
 
 
+def clear_system_proxy_fast() -> bool:
+    """Switch the WinINET proxy off with a registry write only. Never raises.
+
+    This is the part of :func:`disable_proxy` that matters for the user's
+    connectivity, without any child process.  It is what runs while Windows is
+    ending the session: there is very little time, and starting a process
+    during shutdown can fail outright.
+    """
+    if not is_windows():
+        return False
+    try:
+        _set_registry_proxy(0, "")
+        with contextlib.suppress(Exception):
+            refresh_internet_settings()
+        return True
+    except Exception as e:
+        log(f"clear_system_proxy_fast error: {e}")
+        return False
+
+
+def clear_stale_system_proxy(host: str = "127.0.0.1", port: int = 8080) -> bool:
+    """Switch off a CalmWeb proxy left behind by a run that could not clean up.
+
+    A power cut, a crash or a forced kill leaves ``ProxyEnable=1`` pointing at
+    a port nobody listens on any more, so the session has no network until
+    CalmWeb is running again.  Called first thing at startup, before the update
+    check, which would otherwise go through that dead proxy too.  Returns True
+    when a stale setting was found and cleared.
+    """
+    if not system_proxy_is_active(host, port):
+        return False
+    if clear_system_proxy_fast():
+        log("Proxy système laissé actif par une session précédente: désactivé.")
+        stats.record("system", detail="Proxy résiduel d'une session précédente désactivé")
+        return True
+    return False
+
+
 def disable_proxy() -> None:
     """Remove the Windows system proxy settings. Tolerates errors."""
     if not is_windows():
         log("disable_proxy: not on Windows, skipping.")
         return
     try:
+        # Registry first: it is what gives the user the network back, and it
+        # must not wait behind a child process that may be slow or fail.
+        clear_system_proxy_fast()
+
         with contextlib.suppress(Exception):
             subprocess.run(
                 ["netsh", "winhttp", "reset", "proxy"],
                 check=False,
                 creationflags=_NO_WINDOW,
             )
-        # setx with an empty string sets the variable to "" rather than
-        # removing it. This is a known Windows limitation; skipping setx
-        # entirely when disabling so environment variables from the enable
-        # phase persist until the user or a future run clears them.
-        try:
-            _set_registry_proxy(0, "")
-            refresh_internet_settings()
-        except Exception as e:
-            log(f"disable_proxy: registry clear failed: {e}")
 
-        # Nothing has to reach the loopback proxy any more, so put network
-        # isolation back the way it was.
-        try:
-            remove_loopback_exemptions()
-        except Exception as e:
-            log(f"disable_proxy: loopback exemption cleanup failed: {e}")
+        # The loopback exemptions are deliberately left in place: they are
+        # machine-wide, shared by every user, and owned by the installer
+        # (removed only on uninstall). Removing them here would cut the new
+        # Outlook and Teams off the network for every other session.
 
         log("Proxy réinitialisé")
     except Exception as e:
@@ -700,6 +775,169 @@ def set_socket_keepalive(sock: socket.socket) -> None:
 # Shutdown / logoff proxy cleanup
 # ===================================================================
 
+#: Window messages Windows sends to every top-level window when the session
+#: ends (shutdown, restart or logoff).  ``WM_QUERYENDSESSION`` asks, and
+#: ``WM_ENDSESSION`` reports the outcome: ``wParam`` TRUE means the session
+#: really ends, FALSE means another application cancelled it.
+_WM_QUERYENDSESSION: int = 0x0011
+_WM_ENDSESSION: int = 0x0016
+
+#: ``SetProcessShutdownParameters`` level.  0x300-0x3FF is the "first to be
+#: shut down" range for applications: CalmWeb is notified before the default
+#: 0x280 ones, so the proxy is already off while they close.
+_SHUTDOWN_LEVEL_FIRST: int = 0x3FF
+
+#: Class name of the hidden window that receives the session messages.
+_SESSION_WINDOW_CLASS: str = "CalmWebSessionWatcher"
+
+#: Set once the watcher thread has been started, so registering twice is
+#: harmless.
+_SESSION_WATCHER_STARTED = threading.Event()
+
+
+def _call_quietly(callback: Callable[[], object] | None, label: str) -> None:
+    """Run *callback* if given, logging instead of raising."""
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as e:
+        log(f"{label} error: {e}")
+
+
+def handle_session_message(
+    msg: int,
+    wparam: int,
+    on_session_end: Callable[[], object] | None,
+    on_session_resume: Callable[[], object] | None,
+) -> int | None:
+    """React to a session message; return the LRESULT, or None for default handling.
+
+    * ``WM_QUERYENDSESSION``: switch the system proxy off at once, with a
+      registry write only, then accept.  If the process is killed a moment
+      later, the user's next session still has a working network.
+    * ``WM_ENDSESSION`` (TRUE): run the full cleanup (*on_session_end*).
+    * ``WM_ENDSESSION`` (FALSE): the shutdown was cancelled, put the
+      protection back (*on_session_resume*).
+
+    Kept free of any Win32 call apart from the registry write so it can be
+    unit-tested on any platform.
+    """
+    if msg == _WM_QUERYENDSESSION:
+        log("Fin de session Windows annoncée: désactivation du proxy système.")
+        clear_system_proxy_fast()
+        return 1
+    if msg == _WM_ENDSESSION:
+        if wparam:
+            log("Fin de session Windows: nettoyage final.")
+            _call_quietly(on_session_end, "on_session_end")
+        else:
+            log("Fin de session annulée: rétablissement de la protection.")
+            _call_quietly(on_session_resume, "on_session_resume")
+        return 0
+    return None
+
+
+def _run_session_watcher(
+    on_session_end: Callable[[], object] | None,
+    on_session_resume: Callable[[], object] | None,
+) -> None:
+    """Create a hidden top-level window and pump its messages forever.
+
+    A ``--noconsole`` build has no console, so ``SetConsoleCtrlHandler`` never
+    fires and ``atexit`` does not run when Windows terminates the process: the
+    only notice a GUI process gets of a shutdown or logoff is the
+    ``WM_QUERYENDSESSION`` / ``WM_ENDSESSION`` pair sent to its top-level
+    windows.  A message-only window (``HWND_MESSAGE``) does *not* receive those
+    broadcasts, hence a real, never-shown top-level window.
+
+    Private ``WinDLL`` instances are used so the argtypes set here cannot
+    interfere with the ones pystray sets on the shared ``ctypes.windll``.
+    """
+    from ctypes import wintypes  # noqa: PLC0415 - Windows-only module
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+
+    lresult = wintypes.LPARAM
+    wndproc_type = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]
+        lresult, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+    )
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", wndproc_type),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
+
+    user32.DefWindowProcW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+    ]
+    user32.DefWindowProcW.restype = lresult
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+    ]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.GetMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT
+    ]
+    user32.GetMessageW.restype = wintypes.BOOL
+    user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.restype = lresult
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+    def _wndproc(hwnd, msg, wparam, lparam):  # type: ignore[no-untyped-def]
+        try:
+            result = handle_session_message(msg, wparam, on_session_end, on_session_resume)
+            if result is not None:
+                return result
+        except Exception as e:  # a WndProc must never raise
+            log(f"Session watcher error: {e}")
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    callback = wndproc_type(_wndproc)
+    # Keep the callback alive for the life of the process.
+    _run_session_watcher._callback_ref = callback  # type: ignore[attr-defined]
+
+    hinstance = kernel32.GetModuleHandleW(None)
+    wndclass = WNDCLASSW()
+    wndclass.lpfnWndProc = callback
+    wndclass.hInstance = hinstance
+    wndclass.lpszClassName = _SESSION_WINDOW_CLASS
+    if not user32.RegisterClassW(ctypes.byref(wndclass)):
+        log(f"Session watcher: RegisterClassW failed ({ctypes.get_last_error()})")  # type: ignore[attr-defined]
+        return
+
+    # WS_OVERLAPPED (0), never shown; WS_EX_TOOLWINDOW (0x80) keeps it out of
+    # Alt+Tab should anything ever show it.
+    hwnd = user32.CreateWindowExW(
+        0x00000080, _SESSION_WINDOW_CLASS, "CalmWeb", 0,
+        0, 0, 0, 0, None, None, hinstance, None,
+    )
+    if not hwnd:
+        log(f"Session watcher: CreateWindowExW failed ({ctypes.get_last_error()})")  # type: ignore[attr-defined]
+        return
+
+    log("Surveillance de l'arrêt / fermeture de session active.")
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+
 
 def _console_ctrl_handler(event: int) -> bool:
     """Handle Windows console control events to clean up proxy on shutdown/logoff."""
@@ -712,31 +950,60 @@ def _console_ctrl_handler(event: int) -> bool:
     return False
 
 
-def register_shutdown_handler() -> None:
-    """Register handlers to disable the proxy on Windows shutdown, logoff, or close.
+def register_shutdown_handler(
+    on_session_end: Callable[[], object] | None = None,
+    on_session_resume: Callable[[], object] | None = None,
+) -> None:
+    """Make sure the system proxy is switched off whenever CalmWeb stops.
 
-    Two layers of protection:
-    - ``atexit`` handler as the primary safety net (works in --noconsole mode).
-    - ``SetConsoleCtrlHandler`` for CTRL_CLOSE, CTRL_LOGOFF, and CTRL_SHUTDOWN
-      events (may not fire in --noconsole PyInstaller builds, but covers
-      console-mode runs).
+    Three layers, from the one that matters most to the least:
 
-    No-op on non-Windows platforms.
+    - a hidden window receiving ``WM_QUERYENDSESSION`` / ``WM_ENDSESSION``:
+      the only shutdown and logoff notice a ``--noconsole`` build gets (see
+      :func:`_run_session_watcher`).  The process also asks to be among the
+      first notified;
+    - ``atexit``, for an ordinary interpreter exit;
+    - ``SetConsoleCtrlHandler``, for console-mode (development) runs.
+
+    *on_session_end* runs when the session really ends (full cleanup), and
+    *on_session_resume* when a shutdown is cancelled.  A quit from the tray
+    menu is handled by :func:`calmweb.tray.quit_app`; a hard kill or a power
+    cut is caught at the next start by :func:`clear_stale_system_proxy`.
+
+    Idempotent; no-op on non-Windows platforms.
     """
-    if not is_windows():
+    if not is_windows() or _SESSION_WATCHER_STARTED.is_set():
         return
+    _SESSION_WATCHER_STARTED.set()
 
-    # atexit handler -- primary safety net
+    # Shutdown order: be notified before ordinary applications.
+    try:
+        ctypes.windll.kernel32.SetProcessShutdownParameters(  # type: ignore[attr-defined]
+            _SHUTDOWN_LEVEL_FIRST, 0
+        )
+    except Exception as e:
+        log(f"SetProcessShutdownParameters failed: {e}")
+
+    try:
+        threading.Thread(
+            target=_run_session_watcher,
+            args=(on_session_end, on_session_resume),
+            name="calmweb-session-watcher",
+            daemon=True,
+        ).start()
+    except Exception as e:
+        log(f"Session watcher start failed: {e}")
+
     def _cleanup_proxy() -> None:
         disable_proxy()
         remove_quic_policy()
 
     atexit.register(_cleanup_proxy)
 
-    # Console ctrl handler for shutdown/logoff events
+    # Console ctrl handler for shutdown/logoff events (console runs only)
     try:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)  # type: ignore[attr-defined]
         handler = handler_type(_console_ctrl_handler)
         # Keep a reference to prevent garbage collection
         register_shutdown_handler._handler_ref = handler  # type: ignore[attr-defined]
@@ -745,3 +1012,104 @@ def register_shutdown_handler() -> None:
         log(f"Console ctrl handler registration failed (expected in --noconsole mode): {e}")
 
     log("Shutdown handlers registered.")
+
+
+# ===================================================================
+# Machine-wide autostart (all users)
+# ===================================================================
+
+#: Name of the legacy scheduled task that started CalmWeb at logon up to 1.7.x.
+LEGACY_TASK_NAME: str = "CalmWeb"
+
+#: ``HKLM\...\Run`` starts the program at every user's logon, for all users.
+RUN_KEY_PATH: str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE_NAME: str = "CalmWeb"
+
+
+def remove_legacy_scheduled_task() -> bool:
+    """Delete the 1.7.x logon scheduled task if it exists. Never raises.
+
+    Needs administrator rights (the task was created by the installer).
+    Returns True when no task is left.
+    """
+    if not is_windows():
+        return True
+    try:
+        query = subprocess.run(
+            ["schtasks", "/Query", "/tn", LEGACY_TASK_NAME],
+            check=False, capture_output=True, text=True, creationflags=_NO_WINDOW,
+        )
+        if query.returncode != 0:
+            return True
+        delete = subprocess.run(
+            ["schtasks", "/Delete", "/tn", LEGACY_TASK_NAME, "/F"],
+            check=False, capture_output=True, text=True, creationflags=_NO_WINDOW,
+        )
+        if delete.returncode == 0:
+            log("Ancienne tâche planifiée CalmWeb supprimée.")
+            return True
+        log(f"[⚠️] Suppression de la tâche planifiée impossible: {delete.stderr.strip()[:200]}")
+        return False
+    except Exception as e:
+        log(f"remove_legacy_scheduled_task error: {e}")
+        return False
+
+
+def register_autostart_all_users(exe_path: str) -> bool:
+    """Start *exe_path* at logon for every user (``HKLM\\...\\Run``). Never raises.
+
+    Needs administrator rights.  The 64-bit registry view is used explicitly so
+    the value lands where 64-bit Windows reads it first.
+    """
+    if not is_windows() or winreg is None:
+        return False
+    try:
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            RUN_KEY_PATH,
+            0,
+            winreg.KEY_SET_VALUE | getattr(winreg, "KEY_WOW64_64KEY", 0),
+        )
+        try:
+            winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
+        finally:
+            winreg.CloseKey(key)
+        log("Démarrage automatique configuré pour tous les utilisateurs.")
+        return True
+    except Exception as e:
+        log(f"register_autostart_all_users error: {e}")
+        return False
+
+
+# ===================================================================
+# Memory
+# ===================================================================
+
+
+def trim_working_set() -> None:
+    """Ask Windows to page out memory this process no longer touches. Never raises.
+
+    ``SetProcessWorkingSetSize(process, -1, -1)`` empties the working set:
+    pages still in use come straight back on their next access, the rest stay
+    out.  Called after a blocklist (re)load, when the temporary objects of the
+    parsing have just been freed, so the Task Manager shows what CalmWeb
+    actually needs rather than its loading peak.
+    """
+    if not is_windows():
+        return
+    try:
+        # Private instance: the argtypes set here must not leak to other users
+        # of the shared ctypes.windll.kernel32.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.SetProcessWorkingSetSize.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t
+        ]
+        kernel32.SetProcessWorkingSetSize.restype = ctypes.c_int
+        unlimited = ctypes.c_size_t(-1).value
+        if not kernel32.SetProcessWorkingSetSize(
+            kernel32.GetCurrentProcess(), unlimited, unlimited
+        ):
+            log(f"trim_working_set: échec ({ctypes.get_last_error()})")  # type: ignore[attr-defined]
+    except Exception as e:
+        log(f"trim_working_set error: {e}")
