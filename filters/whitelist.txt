@@ -48,6 +48,7 @@ cdn.jsdelivr.net
 # Discord
 ## This domain is needed to allow audio traffic
 discord.media
+media.discordapp.net
 
 # Calm Web
 ## Domains needed to access Calm Web ressources :)
