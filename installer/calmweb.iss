@@ -1,4 +1,4 @@
-; Script revision: 1.8.4
+; Script revision: 1.8.5
 #define MyAppName "CalmWeb"
 ; Version is injected by build.cmd via /DMyAppVersion=X.Y.Z
 ; Fallback for manual compilation:
@@ -105,10 +105,12 @@ Filename: "netsh"; Parameters: "winhttp reset proxy"; Flags: runhidden; RunOnceI
 
 [UninstallDelete]
 Type: files; Name: "{userappdata}\CalmWeb\calmweb.lock"
+Type: files; Name: "{commonappdata}\CalmWeb\loopback_exemptions.txt"
+Type: dirifempty; Name: "{commonappdata}\CalmWeb"
 
 [Code]
 { AppContainer loopback exemptions.
-  Packaged applications (new Outlook, new Teams) and the Windows sign-in
+  Core packaged applications (new Outlook, new Teams, Microsoft Store) and the Windows sign-in
   broker are forbidden from reaching 127.0.0.1 unless exempted, so they lose
   the network while the proxy is on. Setting the exemption needs
   administrator rights: Setup already has them, so it is done here once and
@@ -142,6 +144,27 @@ begin
   LoopbackExempt(Action, 'windows_ie_ac_001');
   LoopbackExempt(Action, 'Microsoft.OutlookForWindows_8wekyb3d8bbwe');
   LoopbackExempt(Action, 'MSTeams_8wekyb3d8bbwe');
+  LoopbackExempt(Action, 'Microsoft.WindowsStore_8wekyb3d8bbwe');
+  LoopbackExempt(Action, 'Microsoft.StorePurchaseApp_8wekyb3d8bbwe');
+end;
+
+{ Every other installed AppContainer (Store, Weather, WhatsApp...) is
+  exempted by CalmWeb itself, run elevated with a dedicated switch, so the
+  discovery logic lives in one place (platform/windows.py). What it adds is
+  recorded in %ProgramData%\CalmWeb and removed on uninstall with
+  --loopback-remove; exemptions set by other tools are left alone.
+  Started through cmd so the PyInstaller bootloader variables inherited from
+  an in-app update are cleared first (see the [Run] section); start /wait
+  keeps Setup waiting until it is done. }
+procedure RunCalmWebLoopback(const Switch: String);
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'),
+       '/C set "_PYI_ARCHIVE_FILE=" & set "_PYI_APPLICATION_HOME_DIR=" & ' +
+       'set "_PYI_PARENT_PROCESS_LEVEL=" & set "_PYI_SPLASH_IPC=" & ' +
+       'start "" /wait "' + ExpandConstant('{app}\{#MyAppExeName}') + '" ' + Switch,
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure InitializeWizard();
@@ -171,6 +194,7 @@ begin
   else if CurStep = ssPostInstall then
   begin
     ApplyLoopbackExemptions('-a');
+    RunCalmWebLoopback('--loopback-exempt-all');
   end;
 end;
 
@@ -178,7 +202,8 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
-    { Undo the exemptions Setup added. }
+    { Undo the exemptions Setup and CalmWeb added. }
+    RunCalmWebLoopback('--loopback-remove');
     ApplyLoopbackExemptions('-d');
   end
   else if CurUninstallStep = usPostUninstall then

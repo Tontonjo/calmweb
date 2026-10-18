@@ -4,7 +4,7 @@ Les composants suivants ont été configurés :
 - Fichier exécutable CalmWeb installé dans le répertoire de votre choix
 - Règle de pare-feu Windows ajoutée (autorise le trafic proxy de CalmWeb)
 - Démarrage automatique à l'ouverture de session, pour tous les utilisateurs
-- Exemptions réseau pour le nouvel Outlook, le nouveau Teams et l'authentification Microsoft
+- Exemptions réseau pour toutes les applications du Microsoft Store installées (nouvel Outlook, Teams, Store...) et l'authentification Microsoft
 
 Configuration :
 
