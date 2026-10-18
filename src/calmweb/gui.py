@@ -6,7 +6,7 @@ settings, lists, about).  Everything user-facing goes through
 :func:`calmweb.i18n.t`, so the whole interface can flip between French and
 English without restarting.
 
-Version: 1.8.4
+Version: 1.8.5
 
 The window lives in its own thread with its own ``mainloop``; the rest of
 the application only ever calls :func:`show_dashboard`.

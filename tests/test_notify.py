@@ -1,6 +1,6 @@
 """Tests for calmweb.notify -- pacing of block notifications.
 
-Version: 1.8.4
+Version: 1.8.5
 
 The point of these is the throttling. A blocked page produces dozens of
 blocked sub-resources in a second; the module is only useful if that turns

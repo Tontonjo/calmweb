@@ -1,6 +1,6 @@
 """Windows-specific functionality for CalmWeb.
 
-Version: 1.8.4
+Version: 1.8.5
 
 Each function has its own platform guard and returns early / is a no-op
 when not running on Windows.
@@ -186,6 +186,11 @@ def remove_quic_policy() -> bool:
 #: application rather than to its sign-in step.  With the proxy on and no
 #: exemption they have no network whatsoever and simply never open.
 #:
+#: The Microsoft Store is in the same situation: ``Microsoft.WindowsStore`` is
+#: the Store application itself, and ``Microsoft.StorePurchaseApp`` is the
+#: separate package that handles sign-in, licence acquisition and purchases
+#: from within the Store.  Without both, the Store stays on its loading screen.
+#:
 #: How this looks in a capture is worth knowing, because it looks like nothing:
 #: the SYN to 127.0.0.1 is dropped by the filtering platform *before* the TCP
 #: stack, so there is no RST and no log line anywhere -- the client retransmits
@@ -201,7 +206,48 @@ LOOPBACK_EXEMPT_PACKAGES: tuple[str, ...] = (
     # Packaged applications, isolated in their entirety.
     "Microsoft.OutlookForWindows_8wekyb3d8bbwe",
     "MSTeams_8wekyb3d8bbwe",
+    "Microsoft.WindowsStore_8wekyb3d8bbwe",
+    "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
 )
+
+# Since 1.8.5 the list above is only the essential core.  Every other
+# AppContainer installed on the machine is exempted as well (see
+# :func:`installed_appcontainers`): any packaged application -- the Store,
+# Weather, WhatsApp, Spotify... -- is otherwise left without network while
+# the proxy is on, and a fixed list can never keep up.  The core stays named
+# here because it must be exempted even before Windows has registered it for
+# the current user (the sign-in broker on a fresh profile, for instance).
+
+#: Where Windows registers the AppContainer profiles of a user: one subkey per
+#: AppContainer SID, whose ``Moniker`` value is the package family name.
+#: Full-trust packaged applications are not network-isolated and have no
+#: entry here, so this is exactly the set that may need an exemption.
+_APPCONTAINER_MAPPINGS: str = (
+    r"Software\Classes\Local Settings\Software\Microsoft\Windows"
+    r"\CurrentVersion\AppContainer\Mappings"
+)
+
+#: The same tree inside a ``HKEY_USERS\<SID>_Classes`` hive.
+_APPCONTAINER_MAPPINGS_IN_CLASSES: str = _APPCONTAINER_MAPPINGS.removeprefix(
+    "Software\\Classes\\"
+)
+
+#: Every AppContainer SID starts with this prefix.
+_APPCONTAINER_SID_PREFIX: str = "S-1-15-2-"
+
+#: Exemptions added beyond :data:`LOOPBACK_EXEMPT_PACKAGES`, one SID per line,
+#: so the uninstaller removes exactly those and nothing another tool set.
+#: Machine-wide, like the exemptions themselves.
+LOOPBACK_RECORD_PATH: str = os.path.join(
+    os.getenv("ProgramData") or os.path.expanduser("~"),
+    "CalmWeb",
+    "loopback_exemptions.txt",
+)
+
+#: Command-line switches the installer uses, elevated: exempt every installed
+#: AppContainer after installation, remove what was recorded on uninstall.
+LOOPBACK_EXEMPT_ALL_FLAG: str = "--loopback-exempt-all"
+LOOPBACK_REMOVE_FLAG: str = "--loopback-remove"
 
 #: Upper bound on a single CheckNetIsolation call, so a hung helper cannot
 #: freeze the proxy toggle.
@@ -229,16 +275,140 @@ def loopback_exemptions_present() -> str:
     return out.lower() if code == 0 else ""
 
 
+def _read_appcontainer_mappings(root: object, path: str) -> dict[str, str]:
+    """Return ``{SID: package family name}`` found under one Mappings key."""
+    found: dict[str, str] = {}
+    try:
+        with winreg.OpenKey(root, path) as key:  # type: ignore[union-attr]
+            index = 0
+            while True:
+                try:
+                    sid = winreg.EnumKey(key, index)  # type: ignore[union-attr]
+                except OSError:
+                    break
+                index += 1
+                if not sid.upper().startswith(_APPCONTAINER_SID_PREFIX):
+                    continue
+                moniker = ""
+                with contextlib.suppress(OSError), winreg.OpenKey(key, sid) as sub:  # type: ignore[union-attr]
+                    moniker = str(winreg.QueryValueEx(sub, "Moniker")[0])  # type: ignore[union-attr]
+                found[sid] = moniker
+    except OSError:
+        pass
+    return found
+
+
+def installed_appcontainers() -> dict[str, str]:
+    """Return ``{SID: package family name}`` for every AppContainer found.
+
+    Always the current user's.  When running elevated (Setup), also those of
+    every profile loaded in HKEY_USERS, i.e. every user with an open session.
+    Never raises; empty off Windows.
+    """
+    if not is_windows() or winreg is None:
+        return {}
+    found = _read_appcontainer_mappings(winreg.HKEY_CURRENT_USER, _APPCONTAINER_MAPPINGS)
+    if is_admin():
+        index = 0
+        while True:
+            try:
+                hive = winreg.EnumKey(winreg.HKEY_USERS, index)
+            except OSError:
+                break
+            index += 1
+            if hive.endswith("_Classes"):
+                found.update(
+                    _read_appcontainer_mappings(
+                        winreg.HKEY_USERS, f"{hive}\\{_APPCONTAINER_MAPPINGS_IN_CLASSES}"
+                    )
+                )
+    return found
+
+
+def _is_appcontainer_sid(target: str) -> bool:
+    return target.upper().startswith(_APPCONTAINER_SID_PREFIX)
+
+
+def _checknetisolation_target(target: str) -> str:
+    """CheckNetIsolation argument for a package name or an AppContainer SID."""
+    return f"-p={target}" if _is_appcontainer_sid(target) else f"-n={target}"
+
+
+def loopback_targets() -> list[str]:
+    """Everything to exempt: the core packages by name, then every other
+    installed AppContainer by SID."""
+    targets = list(LOOPBACK_EXEMPT_PACKAGES)
+    core = {pkg.lower() for pkg in LOOPBACK_EXEMPT_PACKAGES}
+    for sid, moniker in sorted(installed_appcontainers().items()):
+        if moniker.lower() not in core:
+            targets.append(sid)
+    return targets
+
+
 def missing_loopback_exemptions() -> list[str]:
-    """Return the packages in :data:`LOOPBACK_EXEMPT_PACKAGES` not yet exempted."""
+    """Return the targets of :func:`loopback_targets` not yet exempted."""
     if not is_windows():
         return []
-    listing = loopback_exemptions_present()
-    return [pkg for pkg in LOOPBACK_EXEMPT_PACKAGES if pkg.lower() not in listing]
+    # Whole words only: a SID must never match as the prefix of a longer one.
+    exempted = set(loopback_exemptions_present().split())
+    return [target for target in loopback_targets() if target.lower() not in exempted]
+
+
+def _recorded_loopback_sids() -> list[str]:
+    """SIDs CalmWeb exempted beyond the core list (see LOOPBACK_RECORD_PATH)."""
+    try:
+        with open(LOOPBACK_RECORD_PATH, encoding="utf-8") as f:
+            return [line.strip() for line in f if _is_appcontainer_sid(line.strip())]
+    except OSError:
+        return []
+
+
+def _record_loopback_sids(sids: list[str]) -> None:
+    """Append newly exempted SIDs to the record. Never raises."""
+    if not sids:
+        return
+    try:
+        known = set(_recorded_loopback_sids())
+        os.makedirs(os.path.dirname(LOOPBACK_RECORD_PATH), exist_ok=True)
+        with open(LOOPBACK_RECORD_PATH, "a", encoding="utf-8") as f:
+            f.writelines(f"{sid}\n" for sid in sids if sid not in known)
+    except OSError as e:
+        log(f"[⚠️] Liste des exemptions loopback non enregistrée: {e}")
+
+
+def remove_recorded_loopback_exemptions() -> bool:
+    """Undo the exemptions recorded in LOOPBACK_RECORD_PATH (uninstaller).
+
+    The core packages are removed by the uninstaller itself.  Returns True
+    when every recorded exemption was removed.  Never raises.
+    """
+    if not is_windows():
+        return True
+    complete = True
+    for sid in _recorded_loopback_sids():
+        code, out = _run_checknetisolation(["LoopbackExempt", "-d", f"-p={sid}"])
+        if code != 0:
+            # Usually an application uninstalled meanwhile: nothing left to undo.
+            complete = False
+            log(f"Exemption loopback non retirée pour {sid}: {out.strip()[:200]}")
+    with contextlib.suppress(OSError):
+        os.remove(LOOPBACK_RECORD_PATH)
+    return complete
+
+
+def run_loopback_command(argv: list[str]) -> bool:
+    """Handle the installer switches. Returns True when one was handled."""
+    if LOOPBACK_EXEMPT_ALL_FLAG in argv:
+        apply_loopback_exemptions()
+        return True
+    if LOOPBACK_REMOVE_FLAG in argv:
+        remove_recorded_loopback_exemptions()
+        return True
+    return False
 
 
 def apply_loopback_exemptions() -> bool:
-    """Let the Windows authentication brokers reach the proxy on 127.0.0.1.
+    """Let every installed AppContainer reach the proxy on 127.0.0.1.
 
     Exemptions are never removed at runtime, only by the uninstaller: see
     :func:`disable_proxy`.
@@ -268,15 +438,28 @@ def apply_loopback_exemptions() -> bool:
             return False
 
         complete = True
-        for package in missing:
-            code, out = _run_checknetisolation(["LoopbackExempt", "-a", f"-n={package}"])
+        added_sids: list[str] = []
+        for target in missing:
+            code, out = _run_checknetisolation(
+                ["LoopbackExempt", "-a", _checknetisolation_target(target)]
+            )
             if code == 0:
-                log(f"Exemption loopback ajoutée pour {package}")
-                stats.record("system", detail=f"Exemption loopback ajoutée: {package}")
+                log(f"Exemption loopback ajoutée pour {target}")
+                if _is_appcontainer_sid(target):
+                    added_sids.append(target)
+                else:
+                    stats.record("system", detail=f"Exemption loopback ajoutée: {target}")
             else:
                 complete = False
-                log(f"[⚠️] Exemption loopback impossible pour {package}: {out.strip()[:200]}")
-                stats.record("system", detail=f"Exemption loopback refusée: {package}")
+                log(f"[⚠️] Exemption loopback impossible pour {target}: {out.strip()[:200]}")
+                stats.record("system", detail=f"Exemption loopback refusée: {target}")
+        if added_sids:
+            # One event for the lot: a first run can add dozens of applications.
+            _record_loopback_sids(added_sids)
+            stats.record(
+                "system",
+                detail=f"Exemptions loopback ajoutées: {len(added_sids)} application(s)",
+            )
         return complete
     except Exception as e:
         log(f"apply_loopback_exemptions error: {e}")

@@ -1,6 +1,6 @@
 """CalmWeb installer: copy exe, firewall rule, autostart for all users, and launch.
 
-Version: 1.8.4
+Version: 1.8.5
 
 Normally superseded by the Inno Setup package (installer/calmweb.iss), which
 performs the same steps; this path runs when the executable is started under

@@ -1,6 +1,6 @@
 """Tests for calmweb.domainset and the streaming blocklist loader.
 
-Version: 1.8.4
+Version: 1.8.5
 
 None of these touch the network: lists are fed through file:// URLs or
 directly as bytes.

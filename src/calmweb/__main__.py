@@ -1,6 +1,6 @@
 """CalmWeb entry point (``python -m calmweb``).
 
-Version: 1.8.4
+Version: 1.8.5
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from .platform.windows import (
     register_shutdown_handler,
     remove_quic_policy,
     request_elevation_if_useful,
+    run_loopback_command,
 )
 from .proxy import start_proxy_server
 from .resolver import BlocklistResolver
@@ -308,6 +309,11 @@ def main() -> None:
 
     if "--log-viewer" in sys.argv:
         run_log_viewer()
+        return
+
+    # Installer switches (run elevated by Setup): exempt every installed
+    # AppContainer, or undo that on uninstall, then exit without starting.
+    if run_loopback_command(sys.argv):
         return
 
     # Before the lock: an elevated copy of CalmWeb would find the lock held by

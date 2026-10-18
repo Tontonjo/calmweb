@@ -1,6 +1,6 @@
 """Lightweight bilingual (FR/EN) string table for the CalmWeb user interface.
 
-Version: 1.8.4
+Version: 1.8.5
 
 The application ships in French by default because that is its primary
 audience, but every user-facing string in the GUI and the tray menu goes

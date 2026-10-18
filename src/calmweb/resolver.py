@@ -1,6 +1,6 @@
 """Blocklist downloading, parsing, and domain resolution.
 
-Version: 1.8.4
+Version: 1.8.5
 
 Handles hosts-file format, plain domain lists, CSV, ZIP archive
 blocklists and whitelists (exact, wildcard, CIDR).  Provides

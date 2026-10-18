@@ -1,6 +1,6 @@
 """Compact, read-only set of domain names for the downloaded blocklists.
 
-Version: 1.8.4
+Version: 1.8.5
 
 Why this exists
 ---------------

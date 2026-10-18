@@ -1,6 +1,6 @@
 """Tests for calmweb.platform.windows -- AppContainer loopback exemptions.
 
-Version: 1.8.4
+Version: 1.8.5
 
 These run on any platform: everything that would touch the real system is
 either guarded by ``is_windows()`` or replaced by a fake ``subprocess.run``.
@@ -63,10 +63,15 @@ def _names(calls: list[list[str]], flag: str) -> set[str]:
 
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch: pytest.MonkeyPatch):
-    """Pretend to be Windows, with no exemption left over from another test."""
+def _clean_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Pretend to be Windows, with no exemption left over from another test.
+
+    No AppContainer is discovered unless a test says so, and the record of
+    added exemptions lives in a temporary folder."""
     monkeypatch.setattr(windows, "is_windows", lambda: True)
     monkeypatch.setattr(windows, "is_admin", lambda: True)
+    monkeypatch.setattr(windows, "installed_appcontainers", lambda: {})
+    monkeypatch.setattr(windows, "LOOPBACK_RECORD_PATH", str(tmp_path / "loopback_exemptions.txt"))
     stats.reset()
     yield
     stats.reset()
@@ -219,6 +224,107 @@ def test_packaged_outlook_and_teams_are_covered():
     proxy on and no exemption they have no network at all and never open."""
     assert "Microsoft.OutlookForWindows_8wekyb3d8bbwe" in windows.LOOPBACK_EXEMPT_PACKAGES
     assert "MSTeams_8wekyb3d8bbwe" in windows.LOOPBACK_EXEMPT_PACKAGES
+
+
+def test_microsoft_store_is_covered():
+    """The Store and its purchase/sign-in companion are AppContainers too:
+    without an exemption the Store never gets past its loading screen."""
+    assert "Microsoft.WindowsStore_8wekyb3d8bbwe" in windows.LOOPBACK_EXEMPT_PACKAGES
+    assert "Microsoft.StorePurchaseApp_8wekyb3d8bbwe" in windows.LOOPBACK_EXEMPT_PACKAGES
+
+
+# ===================================================================
+# Every installed AppContainer (1.8.5)
+# ===================================================================
+
+CORE_LISTING = "\n".join(pkg.lower() for pkg in windows.LOOPBACK_EXEMPT_PACKAGES)
+APP_SID = "S-1-15-2-111-222-333-444-555-666-777"
+STORE_SID = "S-1-15-2-999-888-777-666-555-444-333"
+
+
+def _discover(monkeypatch, apps: dict[str, str]) -> None:
+    monkeypatch.setattr(windows, "installed_appcontainers", lambda: apps)
+
+
+def test_installed_appcontainers_are_targeted_by_sid(monkeypatch):
+    """Discovered applications are added by SID; a core package found again
+    in the registry is not listed twice."""
+    _discover(monkeypatch, {
+        APP_SID: "Contoso.Weather_abc123",
+        STORE_SID: "Microsoft.WindowsStore_8wekyb3d8bbwe",
+    })
+
+    targets = windows.loopback_targets()
+
+    assert targets[: len(windows.LOOPBACK_EXEMPT_PACKAGES)] == list(windows.LOOPBACK_EXEMPT_PACKAGES)
+    assert APP_SID in targets
+    assert STORE_SID not in targets
+
+
+def test_apply_exempts_discovered_apps_by_sid_and_records_them(monkeypatch):
+    _discover(monkeypatch, {APP_SID: "Contoso.Weather_abc123"})
+    fake = _FakeRun({"-s": (0, CORE_LISTING)})
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert windows.apply_loopback_exemptions() is True
+
+    assert ["CheckNetIsolation", "LoopbackExempt", "-a", f"-p={APP_SID}"] in fake.calls
+    with open(windows.LOOPBACK_RECORD_PATH, encoding="utf-8") as f:
+        assert f.read().split() == [APP_SID]
+    details = [e.detail for e in stats.events(kinds=("system",))]
+    assert "Exemptions loopback ajoutées: 1 application(s)" in details
+
+
+def test_an_already_exempted_app_is_left_alone(monkeypatch):
+    """Exempted by someone else: not re-added, so not recorded either, and the
+    uninstaller will not take it away."""
+    _discover(monkeypatch, {APP_SID: "Contoso.Weather_abc123"})
+    fake = _FakeRun({"-s": (0, CORE_LISTING + "\n    SID:  " + APP_SID.lower())})
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert windows.apply_loopback_exemptions() is True
+    assert not any("-a" in args for args in fake.calls)
+    assert windows._recorded_loopback_sids() == []
+
+
+def test_a_sid_never_matches_as_the_prefix_of_a_longer_one(monkeypatch):
+    _discover(monkeypatch, {APP_SID: "Contoso.Weather_abc123"})
+    listing = CORE_LISTING + "\n    SID:  " + APP_SID.lower() + "9"
+    monkeypatch.setattr(subprocess, "run", _FakeRun({"-s": (0, listing)}))
+
+    assert windows.missing_loopback_exemptions() == [APP_SID]
+
+
+def test_uninstall_removes_only_what_was_recorded(monkeypatch):
+    with open(windows.LOOPBACK_RECORD_PATH, "w", encoding="utf-8") as f:
+        f.write(APP_SID + "\n")
+    fake = _FakeRun()
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert windows.remove_recorded_loopback_exemptions() is True
+
+    assert fake.calls == [["CheckNetIsolation", "LoopbackExempt", "-d", f"-p={APP_SID}"]]
+    assert windows._recorded_loopback_sids() == []
+
+
+def test_installer_switches_are_dispatched(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(windows, "apply_loopback_exemptions", lambda: calls.append("apply"))
+    monkeypatch.setattr(
+        windows, "remove_recorded_loopback_exemptions", lambda: calls.append("remove")
+    )
+
+    assert windows.run_loopback_command(["calmweb.exe", windows.LOOPBACK_EXEMPT_ALL_FLAG])
+    assert windows.run_loopback_command(["calmweb.exe", windows.LOOPBACK_REMOVE_FLAG])
+    assert not windows.run_loopback_command(["calmweb.exe"])
+    assert calls == ["apply", "remove"]
+
+
+def test_installed_appcontainers_is_empty_off_windows(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(windows, "is_windows", lambda: False)
+
+    assert windows.installed_appcontainers() == {}
 
 
 def test_missing_admin_rights_stay_out_of_the_activity_feed(monkeypatch):

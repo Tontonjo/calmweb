@@ -4,7 +4,7 @@ The tray stays intentionally small: it shows the current state at a glance,
 offers the handful of switches an advanced user may need, and opens the
 dashboard (:mod:`calmweb.gui`) for everything else.
 
-Version: 1.8.4
+Version: 1.8.5
 """
 
 from __future__ import annotations
