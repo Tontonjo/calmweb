@@ -4,7 +4,7 @@ The tray stays intentionally small: it shows the current state at a glance,
 offers the handful of switches an advanced user may need, and opens the
 dashboard (:mod:`calmweb.gui`) for everything else.
 
-Version: 1.8.5
+Version: 1.8.6
 """
 
 from __future__ import annotations
@@ -567,8 +567,11 @@ def release_system_state() -> None:
     """Put the machine back the way CalmWeb found it, without quitting.
 
     Everything here touches the *system*, not this process: the WinINET proxy
-    settings, the legacy QUIC firewall rule, the
-    listening port and the single-instance lock.
+    settings, the listening port and the single-instance lock.
+
+    No child process is started: this also runs on ``WM_ENDSESSION``, where
+    Windows refuses to initialise new processes.  The legacy QUIC firewall
+    rule is handled at startup and by the installer instead.
 
     It is deliberately separate from :func:`quit_app` because the update
     handover needs it on its own.  ``CloseApplications=force`` in the Inno
@@ -596,11 +599,6 @@ def release_system_state() -> None:
             log("System proxy reset.")
         except Exception as e:
             log(f"Error resetting system proxy: {e}")
-
-        with contextlib.suppress(Exception):
-            from .platform.windows import remove_quic_policy
-
-            remove_quic_policy()
 
         try:
             from .proxy import stop_proxy_server

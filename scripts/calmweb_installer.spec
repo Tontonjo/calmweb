@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../resources/calmweb_icon.png', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../resources/calmweb_active.png', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../resources/calmweb.ico', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../resources/calmweb_active.ico', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../VERSION', '.')]
+datas = [('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../ressources/calmweb_icon.png', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../ressources/calmweb_active.png', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../ressources/calmweb.ico', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../ressources/calmweb_active.ico', '.'), ('Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../VERSION', '.')]
 binaries = []
 hiddenimports = ['urllib3', 'truststore', 'certifi', 'calmweb.net', 'tkinter', 'tkinter.scrolledtext', 'tkinter.ttk', 'tkinter.filedialog', 'tkinter.messagebox', 'darkdetect', 'calmweb.gui', 'calmweb.i18n', 'calmweb.stats']
 tmp_ret = collect_all('customtkinter')
@@ -42,5 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../resources/calmweb.ico'],
+    icon=['Y:/info/Programmes/win/calmweb_jo/calmweb_jo/scripts/../ressources/calmweb.ico'],
 )

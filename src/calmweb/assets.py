@@ -38,9 +38,9 @@ def search_roots() -> list[str]:
     roots: list[str] = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        roots += [meipass, os.path.join(meipass, "resources")]
+        roots += [meipass, os.path.join(meipass, "ressources")]
     root = project_root()
-    roots += [root, os.path.join(root, "resources")]
+    roots += [root, os.path.join(root, "ressources")]
     return roots
 
 

@@ -14,8 +14,8 @@ echo [INFO] Version: %APP_VERSION%
 :: Use PyInstaller via Python (no PATH needed)
 set "PYINSTALLER=python -m PyInstaller"
 
-set "ICON_PNG=%REPO_ROOT%\resources\calmweb_icon.png"
-set "ICON_ICO=%REPO_ROOT%\resources\calmweb.ico"
+set "ICON_PNG=%REPO_ROOT%\ressources\calmweb_icon.png"
+set "ICON_ICO=%REPO_ROOT%\ressources\calmweb.ico"
 set "ICON_SWITCH="
 if /i "%NO_ICON%"=="1" (
   echo NO_ICON=1 set: skipping icon.
@@ -144,10 +144,10 @@ for %%M in (
   --hidden-import calmweb.i18n ^
   --hidden-import calmweb.stats ^
   --collect-all customtkinter ^
-  --add-data "%REPO_ROOT%\resources\calmweb_icon.png;." ^
-  --add-data "%REPO_ROOT%\resources\calmweb_active.png;." ^
-  --add-data "%REPO_ROOT%\resources\calmweb.ico;." ^
-  --add-data "%REPO_ROOT%\resources\calmweb_active.ico;." ^
+  --add-data "%REPO_ROOT%\ressources\calmweb_icon.png;." ^
+  --add-data "%REPO_ROOT%\ressources\calmweb_active.png;." ^
+  --add-data "%REPO_ROOT%\ressources\calmweb.ico;." ^
+  --add-data "%REPO_ROOT%\ressources\calmweb_active.ico;." ^
   --add-data "%REPO_ROOT%\VERSION;." ^
   %TCL_SWITCH% ^
   %TK_SWITCH% ^

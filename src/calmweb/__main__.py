@@ -1,6 +1,6 @@
 """CalmWeb entry point (``python -m calmweb``).
 
-Version: 1.8.5
+Version: 1.8.6
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-; Script revision: 1.8.5
+; Script revision: 1.8.6
 #define MyAppName "CalmWeb"
 ; Version is injected by build.cmd via /DMyAppVersion=X.Y.Z
 ; Fallback for manual compilation:
@@ -37,7 +37,7 @@ PrivilegesRequired=admin
 WizardStyle=modern
 WizardImageFile=wizard.bmp
 WizardSmallImageFile=wizard_small.bmp
-SetupIconFile=..\resources\calmweb.ico
+SetupIconFile=..\ressources\calmweb.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName},0
 UninstallFilesDir={app}\Uninstall
@@ -49,10 +49,10 @@ Name: "french";  MessagesFile: "compiler:Languages\French.isl"
 
 [Files]
 Source: "..\dist\calmweb_installer.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
-Source: "..\resources\calmweb.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\resources\calmweb_active.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\resources\calmweb_icon.png"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\resources\calmweb_active.png"; DestDir: "{app}"; DestName: "calmweb_active.png"; Flags: ignoreversion
+Source: "..\ressources\calmweb.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\ressources\calmweb_active.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\ressources\calmweb_icon.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\ressources\calmweb_active.png"; DestDir: "{app}"; DestName: "calmweb_active.png"; Flags: ignoreversion
 
 [InstallDelete]
 ; Left behind by 1.7.x, which started CalmWeb from a scheduled task

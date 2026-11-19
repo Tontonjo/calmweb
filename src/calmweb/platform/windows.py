@@ -1,6 +1,6 @@
 """Windows-specific functionality for CalmWeb.
 
-Version: 1.8.5
+Version: 1.8.6
 
 Each function has its own platform guard and returns early / is a no-op
 when not running on Windows.
@@ -118,7 +118,9 @@ def quic_rule_present() -> bool:
 def remove_quic_policy() -> bool:
     """Delete the leftover QUIC firewall rule if an earlier version left one.
 
-    Called at startup and again on shutdown.  Returns True when no rule is
+    Called at startup and by the installer, never during a Windows shutdown
+    (starting netsh there fails and Windows reports it to the user).  Returns
+    True when no rule is
     left in place.  Deleting a firewall rule needs administrator rights: when
     they are missing the rule is reported rather than silently kept, because
     the symptom -- UDP/443 blocked machine-wide with no visible cause -- is
@@ -911,21 +913,19 @@ def clear_stale_system_proxy(host: str = "127.0.0.1", port: int = 8080) -> bool:
 
 
 def disable_proxy() -> None:
-    """Remove the Windows system proxy settings. Tolerates errors."""
+    """Remove the Windows system proxy settings. Tolerates errors.
+
+    Registry only, no child process: this runs during a Windows shutdown,
+    where a freshly started process (netsh and the like) fails to initialise
+    and Windows shows "netsh.exe n'a pas pu démarrer correctement".  The
+    WinHTTP proxy is not touched either: CalmWeb never sets it, so resetting
+    it could only wipe a setting the user made.
+    """
     if not is_windows():
         log("disable_proxy: not on Windows, skipping.")
         return
     try:
-        # Registry first: it is what gives the user the network back, and it
-        # must not wait behind a child process that may be slow or fail.
         clear_system_proxy_fast()
-
-        with contextlib.suppress(Exception):
-            subprocess.run(
-                ["netsh", "winhttp", "reset", "proxy"],
-                check=False,
-                creationflags=_NO_WINDOW,
-            )
 
         # The loopback exemptions are deliberately left in place: they are
         # machine-wide, shared by every user, and owned by the installer
@@ -1128,7 +1128,6 @@ def _console_ctrl_handler(event: int) -> bool:
     if event in (2, 5, 6):
         log("System shutdown/logoff detected, disabling proxy...")
         disable_proxy()
-        remove_quic_policy()
         return True
     return False
 
@@ -1179,7 +1178,6 @@ def register_shutdown_handler(
 
     def _cleanup_proxy() -> None:
         disable_proxy()
-        remove_quic_policy()
 
     atexit.register(_cleanup_proxy)
 
