@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\scripts\\pyinstaller_entry.py'],
     pathex=['C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\src'],
     binaries=[],
-    datas=[('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\resources\\calmweb.png', '.'), ('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\resources\\calmweb_active.png', '.'), ('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\VERSION', '.')],
+    datas=[('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\ressources\\calmweb.png', '.'), ('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\ressources\\calmweb_active.png', '.'), ('C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\scripts\\..\\VERSION', '.')],
     hiddenimports=['urllib3', 'tkinter', 'tkinter.scrolledtext'],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\resources\\calmweb.ico'],
+    icon=['C:\\Users\\lilyb\\Desktop\\CalmWeb\\calmweb\\ressources\\calmweb.ico'],
 )

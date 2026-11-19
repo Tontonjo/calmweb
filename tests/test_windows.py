@@ -1,6 +1,6 @@
 """Tests for calmweb.platform.windows -- AppContainer loopback exemptions.
 
-Version: 1.8.5
+Version: 1.8.6
 
 These run on any platform: everything that would touch the real system is
 either guarded by ``is_windows()`` or replaced by a fake ``subprocess.run``.
@@ -768,8 +768,11 @@ class TestSessionEnd:
         assert windows.handle_session_message(0x0001, 0, None, None) is None
         assert cleared == []
 
-    def test_disable_proxy_writes_the_registry_before_any_child_process(self, monkeypatch):
+    def test_disable_proxy_starts_no_child_process(self, monkeypatch):
+        """It runs during a Windows shutdown, where a new process (netsh)
+        fails to start and Windows shows an error to the user."""
         order: list[str] = []
+        monkeypatch.setattr(windows, "is_windows", lambda: True)
         monkeypatch.setattr(
             windows, "_set_registry_proxy", lambda *_: order.append("registry")
         )
@@ -777,10 +780,24 @@ class TestSessionEnd:
         monkeypatch.setattr(
             subprocess, "run", lambda *_a, **_k: order.append("process")
         )
+        monkeypatch.setattr(
+            subprocess, "Popen", lambda *_a, **_k: order.append("process")
+        )
 
         windows.disable_proxy()
 
-        assert order[0] == "registry"
+        assert order == ["registry"]
+
+    def test_console_shutdown_handler_starts_no_child_process(self, monkeypatch):
+        started: list[str] = []
+        monkeypatch.setattr(windows, "is_windows", lambda: True)
+        monkeypatch.setattr(windows, "_set_registry_proxy", lambda *_: None)
+        monkeypatch.setattr(windows, "refresh_internet_settings", lambda: None)
+        monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: started.append("run"))
+        monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: started.append("popen"))
+
+        assert windows._console_ctrl_handler(6) is True
+        assert started == []
 
 
 class TestStaleProxy:
